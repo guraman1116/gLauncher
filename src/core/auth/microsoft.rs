@@ -19,19 +19,21 @@ const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
 const MC_AUTH_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 
-/// Azure AD Client ID for Minecraft
-/// This is the public client ID used by official launchers
-const CLIENT_ID: &str = "00000000402b5328";
-const SCOPE: &str = "XboxLive.signin offline_access";
+/// Azure AD Client ID
+/// Using Prism Launcher's public client ID (well-known working ID for third-party launchers)
+const CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
+const SCOPE: &str = "XboxLive.signin XboxLive.offline_access";
 
 /// Device code response from Microsoft
 #[derive(Debug, Deserialize)]
 pub struct DeviceCodeResponse {
     pub device_code: String,
     pub user_code: String,
+    #[serde(alias = "verification_url")]
     pub verification_uri: String,
     pub expires_in: u32,
     pub interval: u32,
+    #[serde(default)]
     pub message: String,
 }
 
@@ -103,6 +105,8 @@ impl MicrosoftAuth {
     pub async fn start_device_flow(&self) -> Result<DeviceCodeResponse> {
         let params = [("client_id", CLIENT_ID), ("scope", SCOPE)];
 
+        tracing::debug!("Requesting device code from {}", MS_DEVICE_CODE_URL);
+
         let response = self
             .client
             .post(MS_DEVICE_CODE_URL)
@@ -111,10 +115,26 @@ impl MicrosoftAuth {
             .await
             .context("Failed to request device code")?;
 
-        let device_code: DeviceCodeResponse = response
-            .json()
+        let status = response.status();
+        let body_text = response
+            .text()
             .await
-            .context("Failed to parse device code response")?;
+            .context("Failed to read response body")?;
+
+        tracing::debug!(
+            "Device code response status: {}, body: {}",
+            status,
+            body_text
+        );
+
+        if !status.is_success() {
+            anyhow::bail!("Device code request failed ({}): {}", status, body_text);
+        }
+
+        let device_code: DeviceCodeResponse = serde_json::from_str(&body_text).context(format!(
+            "Failed to parse device code response: {}",
+            body_text
+        ))?;
 
         Ok(device_code)
     }

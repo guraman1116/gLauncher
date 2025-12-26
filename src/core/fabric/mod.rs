@@ -199,8 +199,36 @@ impl FabricManager {
         // Override main class
         merged.main_class = fabric_profile.main_class.clone();
 
-        // Add Fabric libraries
+        // Convert Fabric libraries
         let fabric_libs = Self::convert_libraries(&fabric_profile.libraries);
+
+        // Get group:artifact keys from Fabric libraries to filter out vanilla duplicates
+        let fabric_keys: std::collections::HashSet<String> = fabric_libs
+            .iter()
+            .filter_map(|lib| {
+                let parts: Vec<&str> = lib.name.split(':').collect();
+                if parts.len() >= 2 {
+                    Some(format!("{}:{}", parts[0], parts[1]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Filter out vanilla libraries that would conflict with Fabric's versions
+        merged.libraries.retain(|lib| {
+            let parts: Vec<&str> = lib.name.split(':').collect();
+            if parts.len() >= 2 {
+                let key = format!("{}:{}", parts[0], parts[1]);
+                if fabric_keys.contains(&key) {
+                    tracing::debug!("Replacing vanilla library {} with Fabric version", lib.name);
+                    return false;
+                }
+            }
+            true
+        });
+
+        // Add Fabric libraries (they take precedence)
         merged.libraries.extend(fabric_libs);
 
         // Mark as inherited

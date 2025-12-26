@@ -43,11 +43,16 @@ impl AccountManager {
         let entry = Self::get_keyring_entry()?;
         match entry.get_password() {
             Ok(json) => {
+                tracing::debug!("Loaded accounts from keyring: {} bytes", json.len());
                 let data: AccountsData =
                     serde_json::from_str(&json).context("Failed to parse stored accounts")?;
+                tracing::info!("Loaded {} accounts from keyring", data.accounts.len());
                 Ok(data)
             }
-            Err(keyring::Error::NoEntry) => Ok(AccountsData::default()),
+            Err(keyring::Error::NoEntry) => {
+                tracing::debug!("No accounts in keyring (first run)");
+                Ok(AccountsData::default())
+            }
             Err(e) => Err(anyhow::anyhow!("Failed to load accounts: {}", e)),
         }
     }
@@ -56,9 +61,15 @@ impl AccountManager {
     fn save_accounts(&self) -> Result<()> {
         let entry = Self::get_keyring_entry()?;
         let json = serde_json::to_string(&self.data).context("Failed to serialize accounts")?;
+        tracing::debug!(
+            "Saving {} accounts to keyring ({} bytes)",
+            self.data.accounts.len(),
+            json.len()
+        );
         entry
             .set_password(&json)
             .context("Failed to save to keychain")?;
+        tracing::info!("Saved {} accounts to keyring", self.data.accounts.len());
         Ok(())
     }
 

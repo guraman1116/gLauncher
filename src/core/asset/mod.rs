@@ -5,7 +5,10 @@
 use crate::core::version::{AssetIndex, AssetIndexInfo, AssetObject};
 use crate::util::hash::verify_sha1;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use futures::stream::{self, StreamExt};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Asset manager for downloading and managing Minecraft assets
 pub struct AssetManager {
@@ -76,16 +79,25 @@ impl AssetManager {
     }
 
     /// Get missing assets
+    /// If skip_verification is true, only check file existence (faster)
     pub fn get_missing_assets<'a>(
         &self,
         index: &'a AssetIndex,
+        skip_verification: bool,
     ) -> Vec<(&'a String, &'a AssetObject)> {
         index
             .objects
             .iter()
             .filter(|(_, obj)| {
                 let path = self.get_object_path(obj);
-                !path.exists() || !verify_sha1(&path, &obj.hash).unwrap_or(false)
+                if !path.exists() {
+                    return true;
+                }
+                // Skip SHA1 verification if requested (fast mode)
+                if skip_verification {
+                    return false;
+                }
+                !verify_sha1(&path, &obj.hash).unwrap_or(false)
             })
             .collect()
     }
@@ -114,12 +126,18 @@ impl AssetManager {
         Ok(())
     }
 
-    /// Download all missing assets with progress callback
-    pub async fn download_all<F>(&self, index: &AssetIndex, mut progress: F) -> Result<()>
+    /// Download all missing assets with progress callback (parallel)
+    /// If skip_verification is true, only check file existence (faster)
+    pub async fn download_all<F>(
+        &self,
+        index: &AssetIndex,
+        skip_verification: bool,
+        mut progress: F,
+    ) -> Result<()>
     where
-        F: FnMut(usize, usize),
+        F: FnMut(usize, usize) + Send,
     {
-        let missing = self.get_missing_assets(index);
+        let missing = self.get_missing_assets(index, skip_verification);
         let total = missing.len();
 
         if total == 0 {
@@ -127,24 +145,78 @@ impl AssetManager {
             return Ok(());
         }
 
-        tracing::info!("Downloading {} assets...", total);
+        tracing::info!("Downloading {} assets in parallel...", total);
 
-        for (i, (name, object)) in missing.iter().enumerate() {
-            progress(i, total);
+        // Use atomic counter for progress
+        let completed = Arc::new(AtomicUsize::new(0));
+        let objects_dir = self.objects_dir();
 
-            if let Err(e) = self.download_asset(object).await {
-                tracing::warn!("Failed to download asset {}: {}", name, e);
-                // Continue with other assets
+        // Number of concurrent downloads (higher for assets as they're small)
+        const CONCURRENT_DOWNLOADS: usize = 16;
+
+        // Report initial progress
+        progress(0, total);
+
+        // Create download futures
+        let results: Vec<Result<(), String>> = stream::iter(missing)
+            .map(|(name, object)| {
+                let completed = Arc::clone(&completed);
+                let objects_dir = objects_dir.clone();
+                let hash = object.hash.clone();
+                let url = object.get_url();
+                let name = name.clone();
+                let size = object.size;
+
+                async move {
+                    let path = format!("{}/{}", &hash[..2], &hash);
+                    let dest = objects_dir.join(&path);
+
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+
+                    let response = reqwest::get(&url)
+                        .await
+                        .map_err(|e| format!("Failed to download {}: {}", name, e))?;
+                    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+
+                    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+
+                    // Verify SHA1 - skip size 0 objects
+                    if size > 0 {
+                        if let Ok(valid) = verify_sha1(&dest, &hash) {
+                            if !valid {
+                                let _ = std::fs::remove_file(&dest);
+                                return Err(format!("SHA1 mismatch for asset: {}", hash));
+                            }
+                        }
+                    }
+
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .buffer_unordered(CONCURRENT_DOWNLOADS)
+            .collect()
+            .await;
+
+        // Report final progress
+        let final_count = completed.load(Ordering::SeqCst);
+        progress(final_count, total);
+
+        // Log any errors but don't fail completely
+        for result in &results {
+            if let Err(e) = result {
+                tracing::warn!("Asset download error: {}", e);
             }
         }
 
-        progress(total, total);
         Ok(())
     }
 
     /// Get total size of missing assets
     pub fn get_missing_size(&self, index: &AssetIndex) -> u64 {
-        self.get_missing_assets(index)
+        self.get_missing_assets(index, false)
             .iter()
             .map(|(_, obj)| obj.size)
             .sum()

@@ -32,7 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Security - OS keychain
-keyring = "3.6"
+keyring = { version = "3.6", features = ["apple-native"] }
 
 # Auto-update
 self_update = { version = "0.41", features = ["rustls"] }

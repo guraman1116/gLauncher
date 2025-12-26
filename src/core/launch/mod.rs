@@ -24,8 +24,8 @@ impl Launcher {
     pub fn new() -> Self {
         let data_dir = config::config_dir();
 
-        // Auto-detect Java path
-        let java_path = Self::find_java().unwrap_or_else(|| PathBuf::from("java"));
+        // Default to Java 21 (latest LTS)
+        let java_path = Self::find_java_for_version(21).unwrap_or_else(|| PathBuf::from("java"));
 
         Self {
             java_path,
@@ -35,34 +35,128 @@ impl Launcher {
         }
     }
 
-    /// Find Java executable
-    fn find_java() -> Option<PathBuf> {
-        // Check JAVA_HOME
+    /// Find Java executable for a specific major version
+    pub fn find_java_for_version(major_version: u32) -> Option<PathBuf> {
+        println!("Looking for Java {} ...", major_version);
+
+        // Check JAVA_HOME first
         if let Ok(java_home) = std::env::var("JAVA_HOME") {
             let java = PathBuf::from(&java_home).join("bin").join("java");
             if java.exists() {
-                return Some(java);
+                // Check version
+                if Self::check_java_version(&java, major_version) {
+                    println!("Found Java {} via JAVA_HOME: {:?}", major_version, java);
+                    return Some(java);
+                }
             }
         }
 
         // Check common locations on macOS
         #[cfg(target_os = "macos")]
         {
-            let paths = [
-                "/usr/bin/java",
-                "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home/bin/java",
-                "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin/java",
+            // Homebrew paths - check specific version first
+            let homebrew_paths = [
+                format!("/opt/homebrew/opt/openjdk@{}/bin/java", major_version),
+                format!("/usr/local/opt/openjdk@{}/bin/java", major_version),
             ];
-            for path in paths {
-                let java = PathBuf::from(path);
+
+            for path in homebrew_paths {
+                let java = PathBuf::from(&path);
                 if java.exists() {
+                    println!("Found Java {} at: {:?}", major_version, java);
                     return Some(java);
+                }
+            }
+
+            // Temurin/Adoptium paths
+            let temurin_paths = [
+                format!(
+                    "/Library/Java/JavaVirtualMachines/temurin-{}.jdk/Contents/Home/bin/java",
+                    major_version
+                ),
+                format!(
+                    "/Library/Java/JavaVirtualMachines/adoptopenjdk-{}.jdk/Contents/Home/bin/java",
+                    major_version
+                ),
+            ];
+
+            for path in temurin_paths {
+                let java = PathBuf::from(&path);
+                if java.exists() {
+                    println!("Found Java {} at: {:?}", major_version, java);
+                    return Some(java);
+                }
+            }
+
+            // Fallback: Check all JDKs and find one with matching version
+            let jvm_dir = Path::new("/Library/Java/JavaVirtualMachines");
+            if jvm_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(jvm_dir) {
+                    for entry in entries.flatten() {
+                        let java = entry.path().join("Contents/Home/bin/java");
+                        if java.exists() && Self::check_java_version(&java, major_version) {
+                            println!("Found Java {} at: {:?}", major_version, java);
+                            return Some(java);
+                        }
+                    }
                 }
             }
         }
 
-        // Use 'java' from PATH
-        Some(PathBuf::from("java"))
+        // Fall back to PATH and check version
+        let java = PathBuf::from("java");
+        if Self::check_java_version(&java, major_version) {
+            println!("Using Java {} from PATH", major_version);
+            return Some(java);
+        }
+
+        println!("Java {} not found!", major_version);
+        None
+    }
+
+    /// Check if a Java executable is the required version
+    fn check_java_version(java_path: &Path, required_major: u32) -> bool {
+        let output = std::process::Command::new(java_path)
+            .arg("-version")
+            .output();
+
+        if let Ok(output) = output {
+            let version_str = String::from_utf8_lossy(&output.stderr);
+            // Parse version like "openjdk version \"21.0.1\"" or "17.0.17"
+            // The major version is usually the first number
+            for line in version_str.lines() {
+                if line.contains("version") {
+                    // Extract numbers
+                    let parts: Vec<&str> = line.split(|c: char| !c.is_ascii_digit()).collect();
+                    for part in parts {
+                        if let Ok(ver) = part.parse::<u32>() {
+                            if ver == required_major {
+                                return true;
+                            }
+                            // For Java 9+, first number IS the major version
+                            if ver >= 9 {
+                                return ver == required_major;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get Java path for a specific version details
+    pub fn get_java_for_version(&self, details: &VersionDetails) -> Result<PathBuf> {
+        let required_version = details
+            .java_version
+            .as_ref()
+            .map(|jv| jv.major_version)
+            .unwrap_or(8); // Default to Java 8 for old versions
+
+        Self::find_java_for_version(required_version).context(format!(
+            "Java {} not found. Please install it:\n  brew install openjdk@{}",
+            required_version, required_version
+        ))
     }
 
     /// Get version JAR path
@@ -116,10 +210,15 @@ impl Launcher {
         let mut args = vec![
             format!("-Xms{}", min_mem),
             format!("-Xmx{}", max_mem),
-            format!("-Djava.library.path={}", natives_dir.display()),
+            // Don't set java.library.path - let LWJGL extract natives from JAR
+            // This avoids path length issues with macOS OpenGL dispatch
             "-Dminecraft.launcher.brand=gLauncher".to_string(),
             "-Dminecraft.launcher.version=0.1.0".to_string(),
         ];
+
+        // macOS requires starting on the first thread for LWJGL/OpenGL
+        #[cfg(target_os = "macos")]
+        args.push("-XstartOnFirstThread".to_string());
 
         // Add extra JVM args
         args.extend(instance.java.extra_args.clone());
@@ -141,28 +240,29 @@ impl Launcher {
         }
 
         // Modern argument format
-        let mut args = Vec::new();
+        let mut raw_args = Vec::new();
 
         if let Some(ref arguments) = details.arguments {
             for arg in &arguments.game {
                 match arg {
                     crate::core::version::ArgumentValue::Simple(s) => {
-                        args.push(
+                        raw_args.push(
                             self.replace_placeholders(s, instance, details, account, game_dir),
                         );
                     }
                     crate::core::version::ArgumentValue::Conditional(c) => {
-                        // Check rules
-                        if c.rules.iter().all(|r| r.is_allowed()) {
+                        // Check rules - skip demo mode and other conditional features
+                        let dominated_by_features = c.rules.iter().any(|r| r.features.is_some());
+                        if !dominated_by_features && c.rules.iter().all(|r| r.is_allowed()) {
                             match &c.value {
                                 crate::core::version::StringOrVec::Single(s) => {
-                                    args.push(self.replace_placeholders(
+                                    raw_args.push(self.replace_placeholders(
                                         s, instance, details, account, game_dir,
                                     ));
                                 }
                                 crate::core::version::StringOrVec::Multiple(v) => {
                                     for s in v {
-                                        args.push(self.replace_placeholders(
+                                        raw_args.push(self.replace_placeholders(
                                             s, instance, details, account, game_dir,
                                         ));
                                     }
@@ -172,6 +272,45 @@ impl Launcher {
                     }
                 }
             }
+        }
+
+        // Filter out empty arguments and their corresponding flags
+        let mut args = Vec::new();
+        let mut skip_next = false;
+        for (i, arg) in raw_args.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+
+            // Skip demo mode
+            if arg == "--demo" {
+                continue;
+            }
+
+            // Skip arguments that start with $ (unresolved)
+            if arg.contains("${") {
+                // Also skip the preceding flag if any
+                continue;
+            }
+
+            // Check if this is a flag with empty value following
+            if arg.starts_with("--") && !arg.contains('=') {
+                if let Some(next) = raw_args.get(i + 1) {
+                    if next.is_empty() || next.contains("${") {
+                        // Skip this flag and its value
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Skip empty values
+            if arg.is_empty() {
+                continue;
+            }
+
+            args.push(arg.clone());
         }
 
         args
@@ -221,6 +360,37 @@ impl Launcher {
             .replace("${version_type}", &details.version_type)
             .replace("${clientid}", "")
             .replace("${auth_xuid}", "")
+            // Resolution - use reasonable defaults
+            .replace("${resolution_width}", "854")
+            .replace("${resolution_height}", "480")
+            // Quick play options - not used
+            .replace("${quickPlayPath}", "")
+            .replace("${quickPlaySingleplayer}", "")
+            .replace("${quickPlayMultiplayer}", "")
+            .replace("${quickPlayRealms}", "")
+    }
+
+    /// Check if argument should be included (filter out unresolved placeholders and demo)
+    fn should_include_arg(&self, arg: &str, prev_arg: Option<&str>) -> bool {
+        // Skip if still contains unresolved placeholder
+        if arg.contains("${") {
+            return false;
+        }
+        // Skip empty arguments
+        if arg.is_empty() {
+            return false;
+        }
+        // Skip demo mode
+        if arg == "--demo" {
+            return false;
+        }
+        // Skip argument if previous was a flag that requires a value but value is empty/placeholder
+        if let Some(prev) = prev_arg {
+            if prev.starts_with("--") && !prev.contains('=') && arg.is_empty() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Launch Minecraft
@@ -230,6 +400,7 @@ impl Launcher {
         details: &VersionDetails,
         account: &Account,
         classpath: &str,
+        java_path: &Path,
     ) -> Result<Child> {
         let instance_mgr = InstanceManager::new();
         let game_dir = instance_mgr.get_game_dir(&instance.info.name);
@@ -238,39 +409,49 @@ impl Launcher {
         // Ensure game directory exists
         std::fs::create_dir_all(&game_dir)?;
 
-        let mut cmd = Command::new(&self.java_path);
+        println!("Using Java: {:?}", java_path);
+
+        // Build the full command as a shell string for proper environment handling
+        let mut cmd_parts = Vec::new();
+        cmd_parts.push(format!("\"{}\"", java_path.display()));
 
         // JVM arguments
         for arg in self.build_jvm_args(instance, &natives_dir) {
-            cmd.arg(arg);
+            cmd_parts.push(format!("\"{}\"", arg));
         }
 
         // Classpath
-        cmd.arg("-cp").arg(classpath);
+        cmd_parts.push("-cp".to_string());
+        cmd_parts.push(format!("\"{}\"", classpath));
 
         // Main class
-        cmd.arg(&details.main_class);
+        cmd_parts.push(details.main_class.clone());
 
         // Game arguments
         for arg in self.build_game_args(instance, details, account, &game_dir) {
-            cmd.arg(arg);
+            cmd_parts.push(format!("\"{}\"", arg));
         }
 
-        // Set working directory
-        cmd.current_dir(&game_dir);
+        let full_cmd = cmd_parts.join(" ");
 
-        // Redirect output
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        tracing::info!(
-            "Launching Minecraft: {} {}",
-            instance.info.name,
-            instance.info.version
+        println!(
+            "=== MINECRAFT LAUNCH COMMAND ===\nJava: {:?}\nMain class: {}\nGame dir: {:?}\nNatives dir: {:?}",
+            java_path, details.main_class, game_dir, natives_dir
         );
-        tracing::debug!("Command: {:?}", cmd);
+        println!("Full command: cd {:?} && {}", game_dir, full_cmd);
+
+        // Use shell to execute - this ensures proper environment inheritance
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(format!("cd \"{}\" && {}", game_dir.display(), full_cmd));
+
+        // Inherit environment and I/O
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+        cmd.stdin(Stdio::inherit());
 
         let child = cmd.spawn().context("Failed to start Minecraft")?;
+        tracing::info!("Spawned Minecraft process with PID: {:?}", child.id());
 
         Ok(child)
     }

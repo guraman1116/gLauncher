@@ -53,6 +53,12 @@ sha1 = "0.10"
 # Zip extraction (for natives)
 zip = "2.2"
 
+# Open URL in browser
+open = "5.3"
+
+# Glob patterns
+glob = "0.3"
+
 [profile.release]
 opt-level = 3
 lto = true

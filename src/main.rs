@@ -9,10 +9,11 @@ mod gui;
 mod util;
 
 use clap::Parser;
-use cli::Args;
+use cli::{Args, Commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // Initialize logging
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -21,6 +22,12 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    // Handle subcommands first
+    if let Some(command) = args.command {
+        return handle_command(command).await;
+    }
+
+    // Handle CLI flags
     if let Some(instance_name) = &args.instance {
         // CLI mode: Launch instance directly
         tracing::info!("Launching instance: {}", instance_name);
@@ -35,4 +42,28 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_command(command: Commands) -> anyhow::Result<()> {
+    match command {
+        Commands::Create {
+            name,
+            version,
+            loader,
+        } => {
+            println!(
+                "Creating instance '{}' with version {} ({})",
+                name, version, loader
+            );
+            // TODO: Implement instance creation
+            anyhow::bail!("Instance creation not yet implemented")
+        }
+        Commands::Auth { action } => cli::handle_auth(action).await,
+        Commands::Update => {
+            println!("Checking for updates...");
+            // TODO: Implement update check
+            println!("gLauncher is up to date.");
+            Ok(())
+        }
+    }
 }

@@ -2,6 +2,9 @@
 //!
 //! Create, configure, and manage Minecraft instances.
 
+use crate::config;
+use crate::core::version::VersionDetails;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -18,10 +21,11 @@ pub struct InstanceInfo {
     pub name: String,
     pub version: String,
     pub loader: ModLoader,
+    pub loader_version: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModLoader {
     #[default]
@@ -30,6 +34,18 @@ pub enum ModLoader {
     Forge,
     Quilt,
     NeoForge,
+}
+
+impl std::fmt::Display for ModLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModLoader::Vanilla => write!(f, "Vanilla"),
+            ModLoader::Fabric => write!(f, "Fabric"),
+            ModLoader::Forge => write!(f, "Forge"),
+            ModLoader::Quilt => write!(f, "Quilt"),
+            ModLoader::NeoForge => write!(f, "NeoForge"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,33 +101,136 @@ fn default_height() -> u32 {
     720
 }
 
-/// Get the instances directory
-pub fn instances_dir() -> PathBuf {
-    crate::config::config_dir().join("instances")
+/// Instance manager
+pub struct InstanceManager {
+    instances_dir: PathBuf,
 }
 
-/// List all instances
-pub fn list() -> anyhow::Result<Vec<Instance>> {
-    let dir = instances_dir();
-    let mut instances = Vec::new();
-
-    if !dir.exists() {
-        return Ok(instances);
-    }
-
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            let config_path = path.join("instance.toml");
-            if config_path.exists() {
-                let content = std::fs::read_to_string(&config_path)?;
-                let instance: Instance = toml::from_str(&content)?;
-                instances.push(instance);
-            }
+impl InstanceManager {
+    pub fn new() -> Self {
+        Self {
+            instances_dir: config::config_dir().join("instances"),
         }
     }
 
-    Ok(instances)
+    /// Get instances directory
+    pub fn instances_dir(&self) -> &Path {
+        &self.instances_dir
+    }
+
+    /// Get instance directory
+    pub fn get_instance_dir(&self, name: &str) -> PathBuf {
+        self.instances_dir.join(name)
+    }
+
+    /// Get instance game directory (.minecraft)
+    pub fn get_game_dir(&self, name: &str) -> PathBuf {
+        self.get_instance_dir(name).join(".minecraft")
+    }
+
+    /// Get instance natives directory
+    pub fn get_natives_dir(&self, name: &str) -> PathBuf {
+        self.get_instance_dir(name).join("natives")
+    }
+
+    /// Check if instance exists
+    pub fn exists(&self, name: &str) -> bool {
+        self.get_instance_dir(name).join("instance.toml").exists()
+    }
+
+    /// Create a new instance
+    pub fn create(&self, name: &str, version: &str, loader: ModLoader) -> Result<Instance> {
+        let instance_dir = self.get_instance_dir(name);
+
+        if instance_dir.exists() {
+            anyhow::bail!("Instance '{}' already exists", name);
+        }
+
+        // Create directories
+        std::fs::create_dir_all(&instance_dir)?;
+        std::fs::create_dir_all(self.get_game_dir(name))?;
+
+        let instance = Instance {
+            info: InstanceInfo {
+                name: name.to_string(),
+                version: version.to_string(),
+                loader,
+                loader_version: None,
+                created_at: chrono::Utc::now(),
+            },
+            java: InstanceJavaConfig::default(),
+            game: GameConfig::default(),
+        };
+
+        self.save(&instance)?;
+
+        tracing::info!("Created instance: {}", name);
+        Ok(instance)
+    }
+
+    /// Save instance configuration
+    pub fn save(&self, instance: &Instance) -> Result<()> {
+        let config_path = self
+            .get_instance_dir(&instance.info.name)
+            .join("instance.toml");
+        let content = toml::to_string_pretty(instance)?;
+        std::fs::write(&config_path, content)?;
+        Ok(())
+    }
+
+    /// Load instance configuration
+    pub fn load(&self, name: &str) -> Result<Instance> {
+        let config_path = self.get_instance_dir(name).join("instance.toml");
+        let content = std::fs::read_to_string(&config_path)
+            .context(format!("Instance '{}' not found", name))?;
+        let instance: Instance = toml::from_str(&content)?;
+        Ok(instance)
+    }
+
+    /// Delete an instance
+    pub fn delete(&self, name: &str) -> Result<()> {
+        let instance_dir = self.get_instance_dir(name);
+        if !instance_dir.exists() {
+            anyhow::bail!("Instance '{}' not found", name);
+        }
+        std::fs::remove_dir_all(&instance_dir)?;
+        tracing::info!("Deleted instance: {}", name);
+        Ok(())
+    }
+
+    /// List all instances
+    pub fn list(&self) -> Result<Vec<Instance>> {
+        let mut instances = Vec::new();
+
+        if !self.instances_dir.exists() {
+            return Ok(instances);
+        }
+
+        for entry in std::fs::read_dir(&self.instances_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    match self.load(name) {
+                        Ok(instance) => instances.push(instance),
+                        Err(e) => tracing::warn!("Failed to load instance {}: {}", name, e),
+                    }
+                }
+            }
+        }
+
+        // Sort by creation date (newest first)
+        instances.sort_by(|a, b| b.info.created_at.cmp(&a.info.created_at));
+
+        Ok(instances)
+    }
 }
+
+impl Default for InstanceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+use std::path::Path;

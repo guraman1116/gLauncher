@@ -1,8 +1,8 @@
 //! Offline authentication
 //!
-//! For playing without Microsoft account.
+//! For playing without Microsoft account (offline mode).
 
-use super::{AuthResult, Authenticator};
+use super::microsoft::MinecraftProfile;
 use anyhow::Result;
 
 /// Offline authenticator (no real authentication)
@@ -16,25 +16,19 @@ impl OfflineAuth {
             username: username.into(),
         }
     }
-}
 
-impl Authenticator for OfflineAuth {
-    fn authenticate(&self) -> Result<AuthResult> {
-        // Generate a fake UUID for offline mode
-        let uuid = format!("offline-{}", self.username);
+    /// Create an offline profile
+    pub fn create_profile(&self) -> Result<MinecraftProfile> {
+        // Generate a fake UUID for offline mode (based on username hash)
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(format!("OfflinePlayer:{}", self.username));
+        let hash = hasher.finalize();
+        let uuid = format!("{:x}", hash)[..32].to_string();
 
-        Ok(AuthResult {
-            username: self.username.clone(),
-            uuid,
-            access_token: String::new(),
+        Ok(MinecraftProfile {
+            id: uuid,
+            name: self.username.clone(),
         })
-    }
-
-    fn refresh(&self) -> Result<AuthResult> {
-        self.authenticate()
-    }
-
-    fn logout(&self) -> Result<()> {
-        Ok(())
     }
 }

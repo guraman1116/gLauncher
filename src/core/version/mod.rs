@@ -2,6 +2,10 @@
 //!
 //! Download and manage Minecraft versions.
 
+mod details;
+
+pub use details::*;
+
 use serde::{Deserialize, Serialize};
 
 /// Version manifest from Mojang
@@ -46,6 +50,21 @@ pub async fn fetch_manifest() -> anyhow::Result<VersionManifest> {
     let response = reqwest::get(VERSION_MANIFEST_URL).await?;
     let manifest: VersionManifest = response.json().await?;
     Ok(manifest)
+}
+
+/// Get version info by ID
+pub fn get_version_info<'a>(
+    manifest: &'a VersionManifest,
+    version_id: &str,
+) -> Option<&'a VersionInfo> {
+    manifest.versions.iter().find(|v| v.id == version_id)
+}
+
+/// Fetch detailed version info
+pub async fn fetch_version_details(version_info: &VersionInfo) -> anyhow::Result<VersionDetails> {
+    let response = reqwest::get(&version_info.url).await?;
+    let details: VersionDetails = response.json().await?;
+    Ok(details)
 }
 
 /// Filter versions by type

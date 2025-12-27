@@ -58,6 +58,7 @@ open = "5.3"
 
 # Glob patterns
 glob = "0.3"
+image = "0.25.9"
 
 [profile.release]
 opt-level = 3
@@ -68,11 +69,12 @@ strip = true
 [package.metadata.bundle]
 name = "gLauncher"
 identifier = "com.guraman.glauncher"
+icon = ["assets/icons/app_icon.icns"]
 category = "Game"
 short_description = "Lightweight Minecraft Launcher"
 long_description = """
 gLauncher is a lightweight, customizable Minecraft Java Edition launcher.
 It supports Vanilla, Fabric, and Forge mod loaders with fast launch times.
 """
-copyright = "Copyright © 2024 guraman"
+copyright = "Copyright © 2025 guraman"
 

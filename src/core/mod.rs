@@ -5,6 +5,7 @@
 pub mod asset;
 pub mod auth;
 pub mod fabric;
+pub mod forge;
 pub mod instance;
 pub mod java;
 pub mod launch;

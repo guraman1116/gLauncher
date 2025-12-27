@@ -6,6 +6,7 @@ use crate::config;
 use crate::core::asset::AssetManager;
 use crate::core::auth::{Account, AccountManager, DeviceCodeResponse};
 use crate::core::fabric::FabricManager;
+use crate::core::forge::ForgeManager;
 use crate::core::instance::{Instance, InstanceManager, ModLoader};
 use crate::core::java::JavaManager;
 use crate::core::launch::Launcher;
@@ -57,8 +58,11 @@ struct NewInstanceForm {
     name: String,
     version: String,
     loader: ModLoader,
+    loader_version: String,
     available_versions: Vec<String>,
+    available_loader_versions: Vec<String>,
     include_snapshots: bool,
+    loading_loader_versions: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -96,6 +100,7 @@ enum AsyncResult {
     LoginSuccess(String),
     LoginError(String),
     VersionManifest(VersionManifest),
+    LoaderVersions(Vec<String>),
     InstanceCreated(String),
     LaunchProgress(String),
     LaunchSuccess,
@@ -177,6 +182,11 @@ impl LauncherApp {
         let name = self.new_instance.name.clone();
         let version = self.new_instance.version.clone();
         let loader = self.new_instance.loader.clone();
+        let loader_version = if self.new_instance.loader_version.is_empty() {
+            None
+        } else {
+            Some(self.new_instance.loader_version.clone())
+        };
 
         if name.is_empty() || version.is_empty() {
             self.error_message = Some("Please fill in all fields".to_string());
@@ -193,7 +203,7 @@ impl LauncherApp {
         let instance_manager = InstanceManager::new();
 
         std::thread::spawn(move || {
-            match instance_manager.create(&name, &version, loader) {
+            match instance_manager.create(&name, &version, loader, loader_version) {
                 Ok(_) => {
                     let _ = tx.send(AsyncResult::InstanceCreated(name));
                 }
@@ -201,6 +211,65 @@ impl LauncherApp {
                     let _ = tx.send(AsyncResult::Error(e.to_string()));
                 }
             }
+            ctx.request_repaint();
+        });
+    }
+
+    fn fetch_loader_versions(&mut self, ctx: &egui::Context) {
+        let loader = self.new_instance.loader.clone();
+        let mc_version = self.new_instance.version.clone();
+
+        if loader == ModLoader::Vanilla || mc_version.is_empty() {
+            return;
+        }
+
+        self.new_instance.loading_loader_versions = true;
+
+        let (tx, rx) = mpsc::channel();
+        self.async_receiver = Some(rx);
+
+        let ctx = ctx.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let versions = match loader {
+                    ModLoader::Fabric => {
+                        // Fetch Fabric loader versions
+                        match FabricManager::get_loader_versions().await {
+                            Ok(loaders) => loaders
+                                .into_iter()
+                                .filter(|l| l.stable)
+                                .take(20)
+                                .map(|l| l.version)
+                                .collect::<Vec<_>>(),
+                            Err(e) => {
+                                let _ = tx.send(AsyncResult::Error(e.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                    ModLoader::Forge => {
+                        // Fetch Forge versions for this MC version
+                        let data_dir = crate::config::config_dir();
+                        let java_path = std::path::PathBuf::from("java"); // Dummy, not used for fetch
+                        let forge_manager = ForgeManager::new(&data_dir, &java_path);
+                        match forge_manager.get_versions_for_mc(&mc_version).await {
+                            Ok(versions) => versions
+                                .into_iter()
+                                .take(20)
+                                .map(|v| v.forge_version)
+                                .collect::<Vec<_>>(),
+                            Err(e) => {
+                                let _ = tx.send(AsyncResult::Error(e.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                    _ => vec![],
+                };
+                let _ = tx.send(AsyncResult::LoaderVersions(versions));
+            });
             ctx.request_repaint();
         });
     }
@@ -371,6 +440,16 @@ impl LauncherApp {
                         self.status_message = "Ready".to_string();
                         self.success_message = Some("Minecraft launched!".to_string());
                         self.async_receiver = None;
+                    }
+                    AsyncResult::LoaderVersions(versions) => {
+                        self.new_instance.available_loader_versions = versions;
+                        if self.new_instance.loader_version.is_empty()
+                            && !self.new_instance.available_loader_versions.is_empty()
+                        {
+                            self.new_instance.loader_version =
+                                self.new_instance.available_loader_versions[0].clone();
+                        }
+                        self.new_instance.loading_loader_versions = false;
                     }
                 }
             }
@@ -608,6 +687,7 @@ impl LauncherApp {
                         ui.spinner();
                         ui.label("Loading...");
                     } else {
+                        let old_version = self.new_instance.version.clone();
                         egui::ComboBox::from_id_salt("version_select")
                             .selected_text(&self.new_instance.version)
                             .show_ui(ui, |ui| {
@@ -619,6 +699,11 @@ impl LauncherApp {
                                     );
                                 }
                             });
+                        // If version changed, reset loader versions
+                        if old_version != self.new_instance.version {
+                            self.new_instance.available_loader_versions.clear();
+                            self.new_instance.loader_version.clear();
+                        }
                     }
                 });
 
@@ -633,6 +718,7 @@ impl LauncherApp {
 
                 ui.horizontal(|ui| {
                     ui.label("Loader:");
+                    let old_loader = self.new_instance.loader.clone();
                     egui::ComboBox::from_id_salt("loader_select")
                         .selected_text(format!("{}", self.new_instance.loader))
                         .show_ui(ui, |ui| {
@@ -646,8 +732,52 @@ impl LauncherApp {
                                 ModLoader::Fabric,
                                 "Fabric",
                             );
+                            ui.selectable_value(
+                                &mut self.new_instance.loader,
+                                ModLoader::Forge,
+                                "Forge",
+                            );
                         });
+                    // If loader changed, clear loader versions and trigger fetch
+                    if old_loader != self.new_instance.loader {
+                        self.new_instance.available_loader_versions.clear();
+                        self.new_instance.loader_version.clear();
+                    }
                 });
+
+                // Loader version selection (only for Fabric/Forge)
+                if self.new_instance.loader != ModLoader::Vanilla {
+                    ui.horizontal(|ui| {
+                        ui.label("Loader Version:");
+
+                        // Fetch loader versions if empty and MC version is selected
+                        if self.new_instance.available_loader_versions.is_empty()
+                            && !self.new_instance.version.is_empty()
+                            && !self.new_instance.loading_loader_versions
+                        {
+                            self.fetch_loader_versions(ctx);
+                        }
+
+                        if self.new_instance.loading_loader_versions {
+                            ui.spinner();
+                            ui.label("Loading...");
+                        } else if self.new_instance.available_loader_versions.is_empty() {
+                            ui.label("(select MC version)");
+                        } else {
+                            egui::ComboBox::from_id_salt("loader_version_select")
+                                .selected_text(&self.new_instance.loader_version)
+                                .show_ui(ui, |ui| {
+                                    for v in &self.new_instance.available_loader_versions {
+                                        ui.selectable_value(
+                                            &mut self.new_instance.loader_version,
+                                            v.clone(),
+                                            v,
+                                        );
+                                    }
+                                });
+                        }
+                    });
+                }
 
                 ui.add_space(10.0);
 
@@ -678,6 +808,8 @@ impl LauncherApp {
             None => return,
         };
 
+        // Track original name for rename
+        let original_name = instance.info.name.clone();
         let mut should_close = false;
         let mut save_result: Option<Result<(), String>> = None;
 
@@ -686,8 +818,65 @@ impl LauncherApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(_ctx, |ui| {
-                ui.set_min_width(350.0);
+                ui.set_min_width(400.0);
 
+                ui.heading("Instance Info");
+                ui.add_space(5.0);
+
+                // Instance name
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut instance.info.name);
+                });
+
+                // MC Version (display only)
+                ui.horizontal(|ui| {
+                    ui.label("Minecraft:");
+                    ui.label(&instance.info.version);
+                });
+
+                // Loader type
+                ui.horizontal(|ui| {
+                    ui.label("Loader:");
+                    egui::ComboBox::from_id_salt("settings_loader_select")
+                        .selected_text(format!("{}", instance.info.loader))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut instance.info.loader,
+                                ModLoader::Vanilla,
+                                "Vanilla",
+                            );
+                            ui.selectable_value(
+                                &mut instance.info.loader,
+                                ModLoader::Fabric,
+                                "Fabric",
+                            );
+                            ui.selectable_value(
+                                &mut instance.info.loader,
+                                ModLoader::Forge,
+                                "Forge",
+                            );
+                        });
+                });
+
+                // Loader version (only for Fabric/Forge)
+                if instance.info.loader != ModLoader::Vanilla {
+                    ui.horizontal(|ui| {
+                        ui.label("Loader Version:");
+                        let mut loader_version =
+                            instance.info.loader_version.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut loader_version).changed() {
+                            instance.info.loader_version = if loader_version.is_empty() {
+                                None
+                            } else {
+                                Some(loader_version)
+                            };
+                        }
+                    });
+                    ui.label("(Leave empty for recommended version)");
+                }
+
+                ui.add_space(10.0);
                 ui.heading("Memory");
                 ui.add_space(5.0);
 
@@ -835,6 +1024,17 @@ impl LauncherApp {
             self.show_settings_dialog = false;
             // Don't put instance back - it's discarded
         } else if save_result.is_some() {
+            // Handle rename if name changed
+            if original_name != instance.info.name {
+                if let Err(e) = self
+                    .instance_manager
+                    .rename(&original_name, &instance.info.name)
+                {
+                    self.error_message = Some(format!("Failed to rename: {}", e));
+                    self.show_settings_dialog = false;
+                    return;
+                }
+            }
             // Save the instance
             if let Err(e) = self.instance_manager.save(&instance) {
                 self.error_message = Some(format!("Failed to save: {}", e));
@@ -1031,6 +1231,113 @@ async fn launch_instance(
             details.main_class
         );
         println!("Total libraries after Fabric: {}", details.libraries.len());
+    }
+
+    // Apply Forge if needed
+    if instance.info.loader == ModLoader::Forge {
+        let _ = tx.send(AsyncResult::LaunchProgress(
+            "Installing Forge...".to_string(),
+        ));
+
+        // Get Java path for processor execution
+        let data_dir = crate::config::config_dir();
+        let java_manager = JavaManager::new(&data_dir);
+
+        // Forge requires Java - use the version required for this MC version
+        let required_java = JavaManager::get_required_version(&instance.info.version);
+        let java_path = java_manager
+            .ensure_java(required_java, |msg| {
+                println!("Java: {}", msg);
+            })
+            .await
+            .context("Java is required for Forge. Please install Java first.")?;
+
+        let forge_manager = ForgeManager::new(&data_dir, &java_path);
+
+        // Get Forge version (use recommended if not specified)
+        let forge_version = if let Some(ref v) = instance.info.loader_version {
+            // Find the version from promotions
+            let versions = forge_manager
+                .get_versions_for_mc(&instance.info.version)
+                .await?;
+            versions
+                .into_iter()
+                .find(|fv| fv.forge_version == *v)
+                .context(format!("Forge version {} not found", v))?
+        } else {
+            println!("Getting recommended Forge version...");
+            forge_manager
+                .get_recommended(&instance.info.version)
+                .await?
+                .context(format!(
+                    "No recommended Forge version for MC {}",
+                    instance.info.version
+                ))?
+        };
+
+        println!(
+            "Using Forge version: {} for MC {}",
+            forge_version.forge_version, forge_version.mc_version
+        );
+
+        // Install Forge (this downloads, parses, runs processors)
+        let _ = tx.send(AsyncResult::LaunchProgress(format!(
+            "Installing Forge {}...",
+            forge_version.forge_version
+        )));
+
+        let forge_json = forge_manager
+            .install(&forge_version, &instance.info.version)
+            .await?;
+
+        // Merge Forge libraries into details
+        for lib in &forge_json.libraries {
+            // Convert ForgeLibrary to Library
+            let library = crate::core::version::Library {
+                name: lib.name.clone(),
+                downloads: lib
+                    .downloads
+                    .as_ref()
+                    .map(|d| crate::core::version::LibraryDownloads {
+                        artifact: d.artifact.as_ref().map(|a| crate::core::version::Artifact {
+                            path: a.path.clone(),
+                            sha1: a.sha1.clone(),
+                            size: a.size,
+                            url: a.url.clone(),
+                        }),
+                        classifiers: None,
+                    }),
+                natives: None,
+                rules: None,
+                url: lib.url.clone(),
+                extract: None,
+            };
+            details.libraries.push(library);
+        }
+
+        // Update main class
+        details.main_class = forge_json.main_class.clone();
+
+        // Merge arguments if present
+        if let Some(ref forge_args) = forge_json.arguments {
+            if let Some(ref mut args) = details.arguments {
+                for arg in &forge_args.game {
+                    if let Some(s) = arg.as_str() {
+                        args.game
+                            .push(crate::core::version::ArgumentValue::Simple(s.to_string()));
+                    }
+                }
+                for arg in &forge_args.jvm {
+                    if let Some(s) = arg.as_str() {
+                        args.jvm
+                            .push(crate::core::version::ArgumentValue::Simple(s.to_string()));
+                    }
+                }
+            }
+        }
+
+        println!("Forge installed. New main class: {}", details.main_class);
+        println!("Total libraries after Forge: {}", details.libraries.len());
     }
 
     // Setup directories

@@ -194,7 +194,14 @@ impl Launcher {
     }
 
     /// Build JVM arguments
-    fn build_jvm_args(&self, instance: &Instance, natives_dir: &Path) -> Vec<String> {
+    fn build_jvm_args(
+        &self,
+        instance: &Instance,
+        details: &VersionDetails,
+        account: &Account,
+        game_dir: &Path,
+        _natives_dir: &Path,
+    ) -> Vec<String> {
         let min_mem = if instance.java.min_memory.is_empty() {
             "512M".to_string()
         } else {
@@ -220,10 +227,112 @@ impl Launcher {
         #[cfg(target_os = "macos")]
         args.push("-XstartOnFirstThread".to_string());
 
-        // Add extra JVM args
+        // Add JVM args from version JSON (important for Forge)
+        if let Some(ref arguments) = details.arguments {
+            for arg in &arguments.jvm {
+                match arg {
+                    crate::core::version::ArgumentValue::Simple(s) => {
+                        let processed =
+                            self.replace_jvm_placeholders(s, instance, details, account, game_dir);
+                        // Skip empty args
+                        if !processed.is_empty() {
+                            args.push(processed);
+                        }
+                    }
+                    crate::core::version::ArgumentValue::Conditional(cond) => {
+                        // Check if rules allow this argument
+                        if self.check_rules(&cond.rules) {
+                            match &cond.value {
+                                crate::core::version::StringOrVec::Single(s) => {
+                                    let processed = self.replace_jvm_placeholders(
+                                        s, instance, details, account, game_dir,
+                                    );
+                                    if !processed.is_empty() {
+                                        args.push(processed);
+                                    }
+                                }
+                                crate::core::version::StringOrVec::Multiple(values) => {
+                                    for s in values {
+                                        let processed = self.replace_jvm_placeholders(
+                                            s, instance, details, account, game_dir,
+                                        );
+                                        if !processed.is_empty() {
+                                            args.push(processed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add extra JVM args from instance config
         args.extend(instance.java.extra_args.clone());
 
         args
+    }
+
+    /// Replace placeholders in JVM arguments
+    fn replace_jvm_placeholders(
+        &self,
+        arg: &str,
+        instance: &Instance,
+        details: &VersionDetails,
+        _account: &Account,
+        _game_dir: &Path,
+    ) -> String {
+        let classpath_separator = if cfg!(windows) { ";" } else { ":" };
+
+        arg.replace("${launcher_name}", "gLauncher")
+            .replace("${launcher_version}", "0.1.0")
+            .replace("${version_name}", &instance.info.version)
+            .replace(
+                "${library_directory}",
+                &self.libraries_dir.display().to_string(),
+            )
+            .replace("${classpath_separator}", classpath_separator)
+            .replace(
+                "${natives_directory}",
+                &InstanceManager::new()
+                    .get_natives_dir(&instance.info.name)
+                    .display()
+                    .to_string(),
+            )
+            .replace("${version_type}", &details.version_type)
+    }
+
+    /// Check if rules allow an argument
+    fn check_rules(&self, rules: &[crate::core::version::Rule]) -> bool {
+        for rule in rules {
+            let action_allow = rule.action == "allow";
+
+            if let Some(ref os) = rule.os {
+                let os_match = if let Some(ref os_name) = os.name {
+                    #[cfg(target_os = "macos")]
+                    let current_os = "osx";
+                    #[cfg(target_os = "windows")]
+                    let current_os = "windows";
+                    #[cfg(target_os = "linux")]
+                    let current_os = "linux";
+
+                    os_name == current_os
+                } else {
+                    true
+                };
+
+                if action_allow && !os_match {
+                    return false;
+                }
+                if !action_allow && os_match {
+                    return false;
+                }
+            } else if !action_allow {
+                return false;
+            }
+        }
+        true
     }
 
     /// Build game arguments
@@ -416,7 +525,7 @@ impl Launcher {
         cmd_parts.push(format!("\"{}\"", java_path.display()));
 
         // JVM arguments
-        for arg in self.build_jvm_args(instance, &natives_dir) {
+        for arg in self.build_jvm_args(instance, details, account, &game_dir, &natives_dir) {
             cmd_parts.push(format!("\"{}\"", arg));
         }
 

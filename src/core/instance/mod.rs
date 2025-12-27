@@ -139,7 +139,13 @@ impl InstanceManager {
     }
 
     /// Create a new instance
-    pub fn create(&self, name: &str, version: &str, loader: ModLoader) -> Result<Instance> {
+    pub fn create(
+        &self,
+        name: &str,
+        version: &str,
+        loader: ModLoader,
+        loader_version: Option<String>,
+    ) -> Result<Instance> {
         let instance_dir = self.get_instance_dir(name);
 
         if instance_dir.exists() {
@@ -155,7 +161,7 @@ impl InstanceManager {
                 name: name.to_string(),
                 version: version.to_string(),
                 loader,
-                loader_version: None,
+                loader_version,
                 created_at: chrono::Utc::now(),
             },
             java: InstanceJavaConfig::default(),
@@ -195,6 +201,28 @@ impl InstanceManager {
         }
         std::fs::remove_dir_all(&instance_dir)?;
         tracing::info!("Deleted instance: {}", name);
+        Ok(())
+    }
+
+    /// Rename an instance
+    pub fn rename(&self, old_name: &str, new_name: &str) -> Result<()> {
+        if old_name == new_name {
+            return Ok(());
+        }
+
+        let old_dir = self.get_instance_dir(old_name);
+        let new_dir = self.get_instance_dir(new_name);
+
+        if !old_dir.exists() {
+            anyhow::bail!("Instance '{}' not found", old_name);
+        }
+
+        if new_dir.exists() {
+            anyhow::bail!("Instance '{}' already exists", new_name);
+        }
+
+        std::fs::rename(&old_dir, &new_dir)?;
+        tracing::info!("Renamed instance: {} -> {}", old_name, new_name);
         Ok(())
     }
 

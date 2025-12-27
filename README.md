@@ -4,8 +4,6 @@
 
 Designed for speed and simplicity, it supports modern mod loaders like **Fabric** and **Forge** out of the box, with both a sleek GUI and a powerful CLI.
 
-![gLauncher GUI](https://dummyimage.com/800x600/2d2d2d/ffffff&text=GUI+Screenshot)
-*(Note: Replace with actual screenshot)*
 
 ## ✨ Key Features
 

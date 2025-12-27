@@ -11,4 +11,5 @@ pub mod java;
 pub mod launch;
 pub mod library;
 pub mod mods;
+pub mod update;
 pub mod version;

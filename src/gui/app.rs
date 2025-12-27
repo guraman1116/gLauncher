@@ -29,6 +29,15 @@ pub struct LauncherApp {
     login_state: LoginState,
     /// Channel for receiving async results
     async_receiver: Option<mpsc::Receiver<AsyncResult>>,
+    /// Launch progress message to display
+    launch_progress: Option<String>,
+
+    /// Update status
+    update_status: Option<UpdateStatus>,
+
+    /// Sender for async tasks
+    tx: mpsc::Sender<AsyncResult>,
+
     /// Error message to display
     error_message: Option<String>,
     /// Success message to display
@@ -93,6 +102,8 @@ impl Default for LoginState {
     }
 }
 
+use crate::core::update::UpdateStatus;
+
 enum AsyncResult {
     DeviceCode(DeviceCodeResponse),
     LoginSuccess(String),
@@ -102,6 +113,9 @@ enum AsyncResult {
     InstanceCreated(String),
     LaunchProgress(String),
     LaunchSuccess,
+    UpdateCheck(UpdateStatus),
+    UpdateSuccess(String),
+    UpdateError(String),
     Error(String),
 }
 
@@ -110,6 +124,8 @@ impl LauncherApp {
         let instance_manager = InstanceManager::new();
         let instances = instance_manager.list().unwrap_or_default();
 
+        let (tx, rx) = mpsc::channel();
+
         let mut app = Self {
             account_manager: AccountManager::default(),
             instance_manager,
@@ -117,7 +133,10 @@ impl LauncherApp {
             selected_instance: None,
             current_view: View::Instances,
             login_state: LoginState::Idle,
-            async_receiver: None,
+            async_receiver: Some(rx),
+            launch_progress: None,
+            update_status: None, // Initialize update status
+            tx: tx.clone(),      // Add tx field
             error_message: None,
             success_message: None,
             show_create_dialog: false,
@@ -129,6 +148,14 @@ impl LauncherApp {
             status_message: "Ready".to_string(),
             offline_username: String::new(),
         };
+
+        // Start update check
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            use crate::core::update::UpdateManager;
+            let status = UpdateManager::check_for_updates().await;
+            let _ = tx_clone.send(AsyncResult::UpdateCheck(status));
+        });
 
         // Auto-select first instance if available
         if !app.instances.is_empty() {
@@ -434,6 +461,30 @@ impl LauncherApp {
                     AsyncResult::LaunchProgress(msg) => {
                         self.status_message = msg;
                     }
+                    AsyncResult::UpdateCheck(status) => {
+                        match &status {
+                            UpdateStatus::UpdateAvailable { latest, .. } => {
+                                self.success_message =
+                                    Some(format!("⭐ New update available: v{}", latest));
+                            }
+                            UpdateStatus::CheckFailed(e) => {
+                                tracing::error!("Update check failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        self.update_status = Some(status);
+                    }
+                    AsyncResult::UpdateSuccess(version) => {
+                        self.success_message =
+                            Some(format!("Updated to version {}! Please restart.", version));
+                        self.is_loading = false;
+                        self.status_message = "Ready".to_string();
+                    }
+                    AsyncResult::UpdateError(e) => {
+                        self.error_message = Some(format!("Update failed: {}", e));
+                        self.is_loading = false;
+                        self.status_message = "Ready".to_string();
+                    }
                     AsyncResult::LaunchSuccess => {
                         self.is_loading = false;
                         self.status_message = "Ready".to_string();
@@ -518,6 +569,33 @@ impl eframe::App for LauncherApp {
                 } else {
                     ui.label(&self.status_message);
                 }
+
+                if let Some(UpdateStatus::UpdateAvailable { latest, .. }) = &self.update_status {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::LIGHT_BLUE,
+                        format!("⬆️ v{} available", latest),
+                    );
+                    if ui.button("Update Now").clicked() {
+                        self.is_loading = true;
+                        self.status_message = "Updating...".to_string();
+                        let tx = self.tx.clone();
+
+                        tokio::spawn(async move {
+                            use crate::core::update::UpdateManager;
+                            match UpdateManager::update() {
+                                Ok(_) => {
+                                    let _ =
+                                        tx.send(AsyncResult::UpdateSuccess("latest".to_string()));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(AsyncResult::UpdateError(e.to_string()));
+                                }
+                            }
+                        });
+                    }
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("v0.1.0");
                 });

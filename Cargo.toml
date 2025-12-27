@@ -5,7 +5,7 @@ edition = "2024"
 description = "Lightweight, customizable Minecraft Java Edition launcher"
 authors = ["guraman"]
 license = "MIT"
-repository = "https://github.com/guraman/gLauncher"
+repository = "https://github.com/guraman1116/gLauncher"
 
 [dependencies]
 # GUI
@@ -63,3 +63,16 @@ glob = "0.3"
 opt-level = 3
 lto = true
 strip = true
+
+# Bundle configuration for installers
+[package.metadata.bundle]
+name = "gLauncher"
+identifier = "com.guraman.glauncher"
+category = "Game"
+short_description = "Lightweight Minecraft Launcher"
+long_description = """
+gLauncher is a lightweight, customizable Minecraft Java Edition launcher.
+It supports Vanilla, Fabric, and Forge mod loaders with fast launch times.
+"""
+copyright = "Copyright © 2024 guraman"
+

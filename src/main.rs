@@ -53,9 +53,8 @@ async fn handle_command(command: Commands) -> anyhow::Result<()> {
         } => cli::create_instance(&name, &version, &loader).await,
         Commands::Auth { action } => cli::handle_auth(action).await,
         Commands::Update => {
-            println!("Checking for updates...");
-            // TODO: Implement update check
-            println!("gLauncher is up to date.");
+            use crate::core::update::UpdateManager;
+            UpdateManager::update()?;
             Ok(())
         }
     }

@@ -577,11 +577,35 @@ impl ForgeManager {
         version: &ForgeVersion,
         mc_version: &str,
     ) -> Result<ForgeVersionJson> {
+        // Build expected version ID pattern (e.g., "1.20.1-forge-47.2.0")
+        let expected_version_id = format!("{}-forge-{}", mc_version, version.forge_version);
+        let version_dir = self.versions_dir.join(&expected_version_id);
+        let version_file = version_dir.join(format!("{}.json", expected_version_id));
+
+        // Check if Forge is already installed (cached)
+        if version_file.exists() {
+            tracing::info!(
+                "Forge {} already installed, using cached version",
+                version.forge_version
+            );
+            println!(
+                "✨ Forge {} found in cache (fast mode)",
+                version.forge_version
+            );
+
+            let content = std::fs::read_to_string(&version_file)?;
+            let version_json: ForgeVersionJson = serde_json::from_str(&content)
+                .context("Failed to parse cached Forge version JSON")?;
+
+            return Ok(version_json);
+        }
+
         tracing::info!(
             "Installing Forge {} for MC {}",
             version.forge_version,
             mc_version
         );
+        println!("⏳ First-time Forge install (this may take a while)...");
 
         // Step 1: Download installer
         let installer_path = self.download_installer(version).await?;
@@ -603,7 +627,7 @@ impl ForgeManager {
         // Step 6: Run processors
         self.run_processors(&profile, mc_version, &installer_path)?;
 
-        // Step 7: Save version JSON
+        // Step 7: Save version JSON (for caching)
         let version_id = &version_json.id;
         let version_dir = self.versions_dir.join(version_id);
         std::fs::create_dir_all(&version_dir)?;

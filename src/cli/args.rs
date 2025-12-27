@@ -58,6 +58,11 @@ pub enum Commands {
 pub enum AuthAction {
     /// Login with Microsoft account
     Login,
+    /// Add an offline account
+    Offline {
+        /// Username for offline mode
+        username: String,
+    },
     /// Logout from current account
     Logout,
     /// Show authentication status

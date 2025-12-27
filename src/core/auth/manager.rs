@@ -146,6 +146,34 @@ impl AccountManager {
         Ok(account)
     }
 
+    /// Add an offline account with the given username
+    pub fn add_offline_account(&mut self, username: &str) -> Result<Account> {
+        let account = Account::new_offline(username);
+
+        // Check if account with same name already exists
+        if self
+            .data
+            .accounts
+            .iter()
+            .any(|a| a.profile.name == account.profile.name)
+        {
+            anyhow::bail!("Account with username '{}' already exists", username);
+        }
+
+        // Add new account
+        self.data.accounts.push(account.clone());
+
+        // Set as active
+        self.data.active_uuid = Some(account.profile.id.clone());
+        for acc in &mut self.data.accounts {
+            acc.is_active = acc.profile.id == account.profile.id;
+        }
+
+        self.save_accounts()?;
+        tracing::info!("Added offline account: {}", username);
+        Ok(account)
+    }
+
     /// Refresh the active account's tokens
     pub async fn refresh_active(&mut self) -> Result<()> {
         let account = self.active_account().context("No active account")?.clone();

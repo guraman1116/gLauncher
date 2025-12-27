@@ -78,14 +78,48 @@ pub struct MinecraftProfile {
     pub name: String,
 }
 
+/// Account type (Microsoft or Offline)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum AccountType {
+    #[default]
+    Microsoft,
+    Offline,
+}
+
 /// Complete account data for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub profile: MinecraftProfile,
+    #[serde(default)]
+    pub account_type: AccountType,
+    #[serde(default)]
     pub ms_refresh_token: String,
+    #[serde(default)]
     pub mc_access_token: String,
     #[serde(default)]
     pub is_active: bool,
+}
+
+impl Account {
+    /// Create an offline account with the given username
+    pub fn new_offline(username: &str) -> Self {
+        use super::OfflineAuth;
+        let auth = OfflineAuth::new(username);
+        let profile = auth.create_profile().unwrap();
+
+        Self {
+            profile,
+            account_type: AccountType::Offline,
+            ms_refresh_token: String::new(),
+            mc_access_token: String::new(),
+            is_active: false,
+        }
+    }
+
+    /// Check if this is an offline account
+    pub fn is_offline(&self) -> bool {
+        self.account_type == AccountType::Offline
+    }
 }
 
 /// Microsoft authenticator using Device Code flow
@@ -375,6 +409,7 @@ impl MicrosoftAuth {
 
         Ok(Account {
             profile,
+            account_type: AccountType::Microsoft,
             ms_refresh_token: ms_token.refresh_token,
             mc_access_token: mc_auth.access_token,
             is_active: true,
@@ -403,6 +438,7 @@ impl MicrosoftAuth {
 
         Ok(Account {
             profile,
+            account_type: AccountType::Microsoft,
             ms_refresh_token: ms_token.refresh_token,
             mc_access_token: mc_auth.access_token,
             is_active: account.is_active,

@@ -6,37 +6,119 @@ mod args;
 
 pub use args::{Args, AuthAction, Commands};
 
-use crate::core::auth::AccountManager;
-use anyhow::Result;
+use crate::core::auth::{AccountManager, AccountType};
+use crate::core::instance::{InstanceManager, ModLoader};
+use crate::core::launch::{LaunchResult, launch_instance_async};
+use anyhow::{Context, Result};
 
 /// Launch a specific instance directly
-pub fn run_instance(name: &str, offline: bool) -> Result<()> {
-    tracing::info!("Running instance '{}' (offline: {})", name, offline);
+pub async fn run_instance(name: &str, _offline: bool) -> Result<()> {
+    tracing::info!("Running instance '{}'", name);
 
-    // TODO: Implement instance launching
-    // 1. Load instance config
-    // 2. Verify game files
-    // 3. Start Minecraft process
+    let instance_manager = InstanceManager::new();
+    let account_manager = AccountManager::new()?;
+
+    // Load instance
+    let instance = instance_manager
+        .load(name)
+        .context(format!("Instance '{}' not found", name))?;
+
+    // Get active account
+    let account = account_manager
+        .active_account()
+        .context("No active account. Use 'glauncher auth login' first.")?
+        .clone();
 
     println!("🚀 Launching instance: {}", name);
-    if offline {
-        println!("   Mode: Offline");
+    println!("   Version: {}", instance.info.version);
+    println!("   Loader: {}", instance.info.loader);
+    println!(
+        "   Account: {} ({})",
+        account.profile.name,
+        if account.account_type == AccountType::Offline {
+            "Offline"
+        } else {
+            "Microsoft"
+        }
+    );
+
+    // Use shared launch logic
+    match launch_instance_async(&instance, &account, |msg| {
+        println!("   {}", msg);
+    })
+    .await?
+    {
+        LaunchResult::Success(mut child) => {
+            println!("✅ Minecraft started (PID: {:?})", child.id());
+            // Wait for process
+            let _ = child.wait()?;
+        }
+        LaunchResult::EarlyExit(code) => {
+            println!("❌ Minecraft exited early with code: {:?}", code);
+            println!("   Check the terminal output for error details.");
+        }
     }
 
-    anyhow::bail!("Instance launching not yet implemented")
+    Ok(())
 }
 
 /// List all available instances
 pub fn list_instances() -> Result<()> {
-    tracing::info!("Listing instances");
+    let instance_manager = InstanceManager::new();
+    let instances = instance_manager.list()?;
 
-    // TODO: Implement instance listing
-    // 1. Read instances directory
-    // 2. Parse instance configs
-    // 3. Display list
+    if instances.is_empty() {
+        println!("📦 No instances found.");
+        println!("   Use 'glauncher create <name> --version <ver>' to create one.");
+        return Ok(());
+    }
 
-    println!("📦 Instances:");
-    println!("   (No instances found)");
+    println!("📦 Instances ({}):", instances.len());
+    println!();
+
+    for instance in &instances {
+        let loader = format!("{}", instance.info.loader);
+        println!(
+            "   {} - {} ({})",
+            instance.info.name, instance.info.version, loader
+        );
+    }
+
+    Ok(())
+}
+
+/// Create a new instance from CLI
+pub async fn create_instance(name: &str, version: &str, loader: &str) -> Result<()> {
+    let instance_manager = InstanceManager::new();
+
+    let mod_loader = match loader.to_lowercase().as_str() {
+        "vanilla" => ModLoader::Vanilla,
+        "fabric" => ModLoader::Fabric,
+        "forge" => ModLoader::Forge,
+        _ => anyhow::bail!("Unknown loader: {}. Use vanilla, fabric, or forge.", loader),
+    };
+
+    println!("📦 Creating instance '{}'...", name);
+    println!("   Version: {}", version);
+    println!("   Loader: {}", loader);
+
+    instance_manager.create(name, version, mod_loader, None)?;
+
+    println!("✅ Instance '{}' created successfully!", name);
+    println!("   Use 'glauncher -i {}' to launch.", name);
+
+    Ok(())
+}
+
+/// Add an offline account
+pub fn add_offline_account(username: &str) -> Result<()> {
+    let mut manager = AccountManager::new()?;
+
+    let account = manager.add_offline_account(username)?;
+
+    println!("✅ Added offline account: {}", account.profile.name);
+    println!("   UUID: {}", account.profile.id);
+    println!("   Note: Offline accounts cannot join multiplayer servers.");
 
     Ok(())
 }
@@ -45,6 +127,7 @@ pub fn list_instances() -> Result<()> {
 pub async fn handle_auth(action: AuthAction) -> Result<()> {
     match action {
         AuthAction::Login => auth_login().await,
+        AuthAction::Offline { username } => add_offline_account(&username),
         AuthAction::Logout => auth_logout(),
         AuthAction::Status => auth_status(),
     }
@@ -105,16 +188,21 @@ fn auth_status() -> Result<()> {
 
     if accounts.is_empty() {
         println!("👤 No accounts linked.");
-        println!("   Use 'glauncher auth login' to add an account.");
+        println!("   Use 'glauncher auth login' to add a Microsoft account.");
+        println!("   Use 'glauncher auth offline <username>' to add an offline account.");
         return Ok(());
     }
 
-    println!("👤 Accounts:");
+    println!("👤 Accounts ({}):", accounts.len());
     for account in accounts {
-        let active = if account.is_active { " (active)" } else { "" };
+        let active = if account.is_active { " ✓ active" } else { "" };
+        let acc_type = match account.account_type {
+            AccountType::Microsoft => "🔐 Microsoft",
+            AccountType::Offline => "👤 Offline",
+        };
         println!(
-            "   {} - {}{}",
-            account.profile.name, account.profile.id, active
+            "   {} {} ({}){}",
+            acc_type, account.profile.name, account.profile.id, active
         );
     }
 

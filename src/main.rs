@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(instance_name) = &args.instance {
         // CLI mode: Launch instance directly
         tracing::info!("Launching instance: {}", instance_name);
-        cli::run_instance(instance_name, args.offline)?;
+        cli::run_instance(instance_name, args.offline).await?;
     } else if args.list {
         // List instances
         cli::list_instances()?;
@@ -50,14 +50,7 @@ async fn handle_command(command: Commands) -> anyhow::Result<()> {
             name,
             version,
             loader,
-        } => {
-            println!(
-                "Creating instance '{}' with version {} ({})",
-                name, version, loader
-            );
-            // TODO: Implement instance creation
-            anyhow::bail!("Instance creation not yet implemented")
-        }
+        } => cli::create_instance(&name, &version, &loader).await,
         Commands::Auth { action } => cli::handle_auth(action).await,
         Commands::Update => {
             println!("Checking for updates...");

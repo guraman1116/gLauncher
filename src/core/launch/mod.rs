@@ -2,6 +2,9 @@
 //!
 //! Start Minecraft with proper arguments.
 
+mod runner;
+pub use runner::{LaunchResult, launch_instance_async};
+
 use crate::config;
 use crate::core::asset::AssetManager;
 use crate::core::auth::Account;

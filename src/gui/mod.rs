@@ -2,7 +2,11 @@
 //!
 //! egui-based graphical user interface.
 
+pub mod actions;
 mod app;
+pub mod dialogs;
+pub mod types;
+pub mod views;
 
 use anyhow::Result;
 

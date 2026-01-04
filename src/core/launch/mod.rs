@@ -506,6 +506,9 @@ impl Launcher {
     }
 
     /// Launch Minecraft
+    ///
+    /// If `capture_output` is true, stdout/stderr will be piped for log capture.
+    /// Otherwise, they inherit from the parent process.
     pub fn launch(
         &self,
         instance: &Instance,
@@ -513,6 +516,7 @@ impl Launcher {
         account: &Account,
         classpath: &str,
         java_path: &Path,
+        capture_output: bool,
     ) -> Result<Child> {
         let instance_mgr = InstanceManager::new();
         let game_dir = instance_mgr.get_game_dir(&instance.info.name);
@@ -557,10 +561,16 @@ impl Launcher {
         cmd.arg("-c");
         cmd.arg(format!("cd \"{}\" && {}", game_dir.display(), full_cmd));
 
-        // Inherit environment and I/O
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
-        cmd.stdin(Stdio::inherit());
+        // Set output handling based on capture_output flag
+        if capture_output {
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            cmd.stdin(Stdio::null());
+        } else {
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+            cmd.stdin(Stdio::inherit());
+        }
 
         let child = cmd.spawn().context("Failed to start Minecraft")?;
         tracing::info!("Spawned Minecraft process with PID: {:?}", child.id());

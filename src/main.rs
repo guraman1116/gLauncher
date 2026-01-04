@@ -57,5 +57,27 @@ async fn handle_command(command: Commands) -> anyhow::Result<()> {
             UpdateManager::update()?;
             Ok(())
         }
+        Commands::Ps => {
+            println!("Running instances:");
+            println!("  (No running instances - CLI mode doesn't track other processes)");
+            println!("\nNote: Use the GUI to view running instances and their logs.");
+            Ok(())
+        }
+        Commands::Kill { name } => {
+            println!("⚠️  Kill command currently only works in GUI mode.");
+            println!("   Instance '{}' cannot be killed from CLI.", name);
+            println!("\nNote: Use the GUI to manage running instances.");
+            Ok(())
+        }
+        Commands::Logs {
+            name,
+            follow: _,
+            lines: _,
+        } => {
+            println!("📋 Logs for '{}':", name);
+            println!("   (Log viewing currently only available in GUI mode)");
+            println!("\nNote: Use the GUI to view real-time logs.");
+            Ok(())
+        }
     }
 }

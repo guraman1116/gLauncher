@@ -52,6 +52,27 @@ pub enum Commands {
 
     /// Check for updates
     Update,
+
+    /// List running instances
+    Ps,
+
+    /// Kill a running instance
+    Kill {
+        /// Instance name to kill
+        name: String,
+    },
+
+    /// Show logs for a running instance
+    Logs {
+        /// Instance name
+        name: String,
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show (default: 50)
+        #[arg(short, long, default_value = "50")]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]

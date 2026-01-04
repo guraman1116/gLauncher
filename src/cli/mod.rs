@@ -42,10 +42,15 @@ pub async fn run_instance(name: &str, _offline: bool) -> Result<()> {
         }
     );
 
-    // Use shared launch logic
-    match launch_instance_async(&instance, &account, |msg| {
-        println!("   {}", msg);
-    })
+    // Use shared launch logic (CLI doesn't capture output)
+    match launch_instance_async(
+        &instance,
+        &account,
+        |msg| {
+            println!("   {}", msg);
+        },
+        false,
+    )
     .await?
     {
         LaunchResult::Success(mut child) => {

@@ -26,10 +26,12 @@ pub enum LaunchResult {
 /// Prepare and launch an instance
 ///
 /// This is the shared launch logic used by both CLI and GUI.
+/// If `capture_output` is true, stdout/stderr will be piped for log capture.
 pub async fn launch_instance_async<F>(
     instance: &Instance,
     account: &Account,
     on_progress: F,
+    capture_output: bool,
 ) -> Result<LaunchResult>
 where
     F: Fn(&str) + Send + Sync,
@@ -263,7 +265,14 @@ where
     println!("Starting Minecraft process...");
     on_progress("Starting Minecraft...");
 
-    let mut child = launcher.launch(instance, &details, account, &classpath, &java_path)?;
+    let mut child = launcher.launch(
+        instance,
+        &details,
+        account,
+        &classpath,
+        &java_path,
+        capture_output,
+    )?;
     println!("Process spawned with PID: {:?}", child.id());
 
     // Wait a bit and check if process is still running

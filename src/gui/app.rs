@@ -13,6 +13,11 @@ use anyhow::Context;
 use eframe::egui;
 use std::sync::mpsc;
 
+// Re-use types from the types module
+use super::actions::launch::launch_instance;
+use super::dialogs::log_viewer::cleanup_old_logs;
+use super::types::{AsyncResult, DeviceCodeData, LoginState, NewInstanceForm, View};
+
 /// Main launcher application state
 pub struct LauncherApp {
     /// Account manager
@@ -58,66 +63,17 @@ pub struct LauncherApp {
     status_message: String,
     /// Offline account username input
     offline_username: String,
-}
-
-#[derive(Default)]
-struct NewInstanceForm {
-    name: String,
-    version: String,
-    loader: ModLoader,
-    loader_version: String,
-    available_versions: Vec<String>,
-    available_loader_versions: Vec<String>,
-    include_snapshots: bool,
-    loading_loader_versions: bool,
-}
-
-#[derive(Default, PartialEq)]
-enum View {
-    #[default]
-    Instances,
-    Settings,
-    Accounts,
-}
-
-#[derive(Clone)]
-enum LoginState {
-    Idle,
-    WaitingForCode,
-    ShowingCode(DeviceCodeData),
-    Authenticating,
-}
-
-#[derive(Clone)]
-struct DeviceCodeData {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    interval: u32,
-}
-
-impl Default for LoginState {
-    fn default() -> Self {
-        Self::Idle
-    }
+    /// Process manager for tracking running instances
+    process_manager: crate::core::process::SharedProcessManager,
+    /// Show log viewer window
+    show_log_window: bool,
+    /// Instance name for log window
+    log_window_instance: Option<String>,
+    /// Auto-scroll logs
+    log_auto_scroll: bool,
 }
 
 use crate::core::update::UpdateStatus;
-
-enum AsyncResult {
-    DeviceCode(DeviceCodeResponse),
-    LoginSuccess(String),
-    LoginError(String),
-    VersionManifest(VersionManifest),
-    LoaderVersions(Vec<String>),
-    InstanceCreated(String),
-    LaunchProgress(String),
-    LaunchSuccess,
-    UpdateCheck(UpdateStatus),
-    UpdateSuccess(String),
-    UpdateError(String),
-    Error(String),
-}
 
 impl LauncherApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
@@ -135,8 +91,8 @@ impl LauncherApp {
             login_state: LoginState::Idle,
             async_receiver: Some(rx),
             launch_progress: None,
-            update_status: None, // Initialize update status
-            tx: tx.clone(),      // Add tx field
+            update_status: None,
+            tx: tx.clone(),
             error_message: None,
             success_message: None,
             show_create_dialog: false,
@@ -147,6 +103,10 @@ impl LauncherApp {
             is_loading: false,
             status_message: "Ready".to_string(),
             offline_username: String::new(),
+            process_manager: crate::core::process::create_shared_manager(),
+            show_log_window: false,
+            log_window_instance: None,
+            log_auto_scroll: true,
         };
 
         // Start update check
@@ -313,6 +273,8 @@ impl LauncherApp {
 
         let ctx = ctx.clone();
         let account = self.account_manager.active_account().cloned();
+        let process_manager = std::sync::Arc::clone(&self.process_manager);
+        let instance_name = instance.info.name.clone();
 
         println!("Account: {:?}", account.as_ref().map(|a| &a.profile.name));
 
@@ -321,13 +283,19 @@ impl LauncherApp {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 println!("=== ASYNC BLOCK STARTED ===");
-                if let Err(e) = launch_instance(instance, account, tx.clone()).await {
+                if let Err(e) =
+                    launch_instance(instance, account, tx.clone(), process_manager).await
+                {
                     println!("=== LAUNCH ERROR: {} ===", e);
                     let _ = tx.send(AsyncResult::Error(e.to_string()));
                 }
             });
             ctx.request_repaint();
         });
+
+        // Auto-open log window for the launched instance
+        self.log_window_instance = Some(instance_name);
+        self.show_log_window = true;
     }
 
     fn start_login(&mut self, ctx: &egui::Context) {
@@ -619,8 +587,14 @@ impl eframe::App for LauncherApp {
             self.show_instance_settings_dialog(ctx);
         }
 
-        // Request repaint while waiting
+        // Log viewer window
+        if self.show_log_window {
+            self.show_log_viewer_window(ctx);
+        }
+
+        // Request repaint while waiting or while log window is open
         if self.is_loading
+            || self.show_log_window
             || matches!(
                 self.login_state,
                 LoginState::WaitingForCode | LoginState::Authenticating
@@ -737,6 +711,21 @@ impl LauncherApp {
                     if let Some(i) = self.selected_instance {
                         self.settings_instance = Some(self.instances[i].clone());
                         self.show_settings_dialog = true;
+                    }
+                }
+
+                // View Logs button
+                if ui
+                    .add_enabled(
+                        self.selected_instance.is_some(),
+                        egui::Button::new("📋 Logs"),
+                    )
+                    .clicked()
+                {
+                    if let Some(i) = self.selected_instance {
+                        let name = self.instances[i].info.name.clone();
+                        self.log_window_instance = Some(name);
+                        self.show_log_window = true;
                     }
                 }
             });
@@ -1285,41 +1274,127 @@ impl LauncherApp {
     }
 }
 
-/// Launch an instance (runs in background thread)
-async fn launch_instance(
-    instance: Instance,
-    account: Option<Account>,
-    tx: mpsc::Sender<AsyncResult>,
-) -> anyhow::Result<()> {
-    println!("=== launch_instance START ===");
-    let account = account.context("No account. Please login first.")?;
-    println!("Account OK: {}", account.profile.name);
+impl LauncherApp {
+    /// Show the log viewer window
+    fn show_log_viewer_window(&mut self, ctx: &egui::Context) {
+        let instance_name = match &self.log_window_instance {
+            Some(name) => name.clone(),
+            None => {
+                self.show_log_window = false;
+                return;
+            }
+        };
 
-    // Use shared launch logic with progress callback
-    let tx_clone = tx.clone();
-    match launch_instance_async(&instance, &account, move |msg| {
-        let _ = tx_clone.send(AsyncResult::LaunchProgress(msg.to_string()));
-    })
-    .await
-    {
-        Ok(LaunchResult::Success(_child)) => {
-            tracing::info!("Minecraft process is running");
-            let _ = tx.send(AsyncResult::LaunchSuccess);
-        }
-        Ok(LaunchResult::EarlyExit(code)) => {
-            let error_msg = format!(
-                "Minecraft exited unexpectedly with code: {:?}\nCheck terminal for details.",
-                code
-            );
-            let _ = tx.send(AsyncResult::Error(format!(
-                "Minecraft failed: {}",
-                error_msg
-            )));
-        }
-        Err(e) => {
-            let _ = tx.send(AsyncResult::Error(e.to_string()));
+        let mut open = true;
+
+        // Get screen size and calculate 80% dimensions
+        let screen_rect = ctx.screen_rect();
+        let window_width = screen_rect.width() * 0.4;
+        let window_height = screen_rect.height() * 0.4;
+
+        egui::Window::new(format!("📋 Log Viewer - {}", instance_name))
+            .open(&mut open)
+            .default_size([window_width, window_height])
+            .min_size([window_width, window_height])
+            .max_size([window_width, window_height])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(true)
+            .show(ctx, |ui| {
+                // Get logs from process manager
+                let logs: Vec<String>;
+                let is_running: bool;
+                let pid: Option<u32>;
+
+                if let Ok(mut manager) = self.process_manager.lock() {
+                    if let Some(instance) = manager.get_instance_mut(&instance_name) {
+                        logs = instance.log_buffer.clone();
+                        is_running = instance.is_running();
+                        pid = instance.pid();
+                    } else {
+                        logs = vec!["Process not found or has exited.".to_string()];
+                        is_running = false;
+                        pid = None;
+                    }
+                } else {
+                    logs = vec!["Error accessing process manager.".to_string()];
+                    is_running = false;
+                    pid = None;
+                }
+
+                // Header with status
+                ui.horizontal(|ui| {
+                    if is_running {
+                        ui.colored_label(egui::Color32::GREEN, "● Running");
+                        if let Some(p) = pid {
+                            ui.label(format!("(PID: {})", p));
+                        }
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "○ Stopped");
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if is_running {
+                            if ui.button("🛑 Kill Process").clicked() {
+                                if let Ok(mut manager) = self.process_manager.lock() {
+                                    let _ = manager.kill(&instance_name);
+                                }
+                                self.success_message =
+                                    Some(format!("Killed instance '{}'", instance_name));
+                            }
+                        }
+
+                        ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
+                    });
+                });
+
+                ui.separator();
+
+                // Log display area
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(self.log_auto_scroll)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        for line in &logs {
+                            let color = if line.starts_with("[ERR]") {
+                                egui::Color32::from_rgb(255, 100, 100)
+                            } else if line.contains("/WARN]") {
+                                egui::Color32::YELLOW
+                            } else if line.contains("/INFO]") {
+                                egui::Color32::LIGHT_GRAY
+                            } else {
+                                egui::Color32::WHITE
+                            };
+
+                            ui.colored_label(color, line);
+                        }
+
+                        if logs.is_empty() {
+                            ui.label("No logs yet...");
+                        }
+                    });
+
+                ui.separator();
+
+                // Footer with actions
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} lines", logs.len()));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("📋 Copy All").clicked() {
+                            let all_logs = logs.join("\n");
+                            ui.output_mut(|o| o.copied_text = all_logs);
+                            self.success_message = Some("Logs copied to clipboard".to_string());
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.show_log_window = false;
+            self.log_window_instance = None;
         }
     }
-
-    Ok(())
 }

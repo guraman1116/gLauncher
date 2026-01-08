@@ -423,6 +423,153 @@ impl LauncherApp {
         });
     }
 
+    fn start_fetch_versions(&mut self, ctx: &egui::Context) {
+        let selected_mod = match &self.mod_browser_state.selected_mod {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        let game_version = self.mod_browser_state.game_version.clone();
+        let loader = self.mod_browser_state.loader.clone();
+        let source = selected_mod.source.clone();
+        let api_key = self.config.mods.curseforge_api_key.clone();
+
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+
+        tokio::spawn(async move {
+            let result = match source {
+                crate::core::mods::search::ModSource::Modrinth => {
+                    let client = ModrinthClient::new();
+                    let game_ver = if game_version.is_empty() {
+                        None
+                    } else {
+                        Some(game_version.as_str())
+                    };
+                    let loader_opt = if loader.is_empty() {
+                        None
+                    } else {
+                        Some(loader.as_str())
+                    };
+                    client
+                        .get_versions(&selected_mod.id, game_ver, loader_opt)
+                        .await
+                }
+                crate::core::mods::search::ModSource::CurseForge => {
+                    if api_key.is_empty() {
+                        Err(anyhow::anyhow!("CurseForge API key not configured"))
+                    } else {
+                        let client = CurseForgeClient::new(api_key);
+                        let game_ver = if game_version.is_empty() {
+                            None
+                        } else {
+                            Some(game_version.as_str())
+                        };
+                        let loader_opt = if loader.is_empty() {
+                            None
+                        } else {
+                            Some(loader.as_str())
+                        };
+                        client
+                            .get_files(&selected_mod.id, game_ver, loader_opt)
+                            .await
+                    }
+                }
+            };
+
+            match result {
+                Ok(versions) => {
+                    let _ = tx.send(AsyncResult::ModVersions(versions));
+                }
+                Err(e) => {
+                    let _ = tx.send(AsyncResult::ModError(e.to_string()));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_mod_download(&mut self, ctx: &egui::Context) {
+        let version = match &self.mod_browser_state.selected_version {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        let instance = match &self.mod_browser_state.target_instance {
+            Some(i) => i.clone(),
+            None => {
+                self.mod_browser_state.error = Some("No target instance selected".to_string());
+                return;
+            }
+        };
+
+        let mods_dir = self
+            .instance_manager
+            .get_game_dir(&instance.info.name)
+            .join("mods");
+        let filename = version.filename.clone();
+
+        self.mod_browser_state.download_progress = Some((filename.clone(), 0, version.file_size));
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+
+        tokio::spawn(async move {
+            // Create mods directory if it doesn't exist
+            if let Err(e) = std::fs::create_dir_all(&mods_dir) {
+                let _ = tx.send(AsyncResult::ModError(format!(
+                    "Failed to create mods directory: {}",
+                    e
+                )));
+                ctx.request_repaint();
+                return;
+            }
+
+            let dest_path = mods_dir.join(&filename);
+
+            // Download the file
+            let client = reqwest::Client::new();
+            let response = match client.get(&version.download_url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(AsyncResult::ModError(format!("Download failed: {}", e)));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                let _ = tx.send(AsyncResult::ModError(format!(
+                    "Download failed: HTTP {}",
+                    response.status()
+                )));
+                ctx.request_repaint();
+                return;
+            }
+
+            let bytes = match response.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tx.send(AsyncResult::ModError(format!(
+                        "Failed to read response: {}",
+                        e
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            if let Err(e) = std::fs::write(&dest_path, &bytes) {
+                let _ = tx.send(AsyncResult::ModError(format!(
+                    "Failed to write file: {}",
+                    e
+                )));
+                ctx.request_repaint();
+                return;
+            }
+
+            let _ = tx.send(AsyncResult::ModDownloaded(filename));
+            ctx.request_repaint();
+        });
+    }
+
     fn check_async_results(&mut self) {
         if let Some(rx) = &self.async_receiver {
             if let Ok(result) = rx.try_recv() {
@@ -538,6 +685,7 @@ impl LauncherApp {
                     }
                     AsyncResult::ModVersions(versions) => {
                         self.mod_browser_state.mod_versions = Some(versions);
+                        self.mod_browser_state.loading_versions = false;
                     }
                     AsyncResult::ModDownloaded(filename) => {
                         self.mod_browser_state.download_progress = None;
@@ -546,6 +694,7 @@ impl LauncherApp {
                     }
                     AsyncResult::ModError(e) => {
                         self.mod_browser_state.loading = false;
+                        self.mod_browser_state.loading_versions = false;
                         self.mod_browser_state.download_progress = None;
                         self.mod_browser_state.error = Some(e);
                     }
@@ -1523,6 +1672,18 @@ impl LauncherApp {
         if self.mod_browser_state.search_requested {
             self.mod_browser_state.search_requested = false;
             self.start_mod_search(_ctx);
+        }
+
+        // Check if version fetch was requested
+        if self.mod_browser_state.version_requested {
+            self.mod_browser_state.version_requested = false;
+            self.start_fetch_versions(_ctx);
+        }
+
+        // Check if download was requested
+        if self.mod_browser_state.download_requested {
+            self.mod_browser_state.download_requested = false;
+            self.start_mod_download(_ctx);
         }
 
         // Render the mod browser UI

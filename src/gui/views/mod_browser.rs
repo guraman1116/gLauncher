@@ -41,6 +41,16 @@ pub struct ModBrowserState {
     pub success_message: Option<String>,
     /// Flag to signal that search should be triggered
     pub search_requested: bool,
+    /// Flag to signal that version fetch should be triggered
+    pub version_requested: bool,
+    /// Flag to signal that download should be triggered
+    pub download_requested: bool,
+    /// Show version selection dialog
+    pub show_version_dialog: bool,
+    /// Selected version for download
+    pub selected_version: Option<ModVersion>,
+    /// Loading versions state
+    pub loading_versions: bool,
 }
 
 /// Source filter for mod search
@@ -207,6 +217,9 @@ pub fn render_mod_browser(
             ui.label("Enter a search query to find mods");
         });
     }
+
+    // Version selection dialog
+    render_version_dialog(ctx, state);
 }
 
 /// Render a single mod card
@@ -249,7 +262,10 @@ fn render_mod_card(ui: &mut egui::Ui, mod_result: &ModSearchResult, state: &mut 
                     ui.horizontal(|ui| {
                         if ui.button("View Versions").clicked() {
                             state.selected_mod = Some(mod_result.clone());
-                            // Would trigger version fetch here
+                            state.mod_versions = None;
+                            state.show_version_dialog = true;
+                            state.version_requested = true;
+                            state.loading_versions = true;
                         }
                         if ui.link("Open Page").clicked() {
                             let _ = open::that(&mod_result.page_url);
@@ -296,4 +312,126 @@ fn format_downloads(downloads: u64) -> String {
     } else {
         downloads.to_string()
     }
+}
+
+/// Render version selection dialog
+fn render_version_dialog(ctx: &egui::Context, state: &mut ModBrowserState) {
+    if !state.show_version_dialog {
+        return;
+    }
+
+    let mod_name = state
+        .selected_mod
+        .as_ref()
+        .map(|m| m.name.clone())
+        .unwrap_or_default();
+
+    egui::Window::new(format!("Select Version - {}", mod_name))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(500.0)
+        .default_height(400.0)
+        .show(ctx, |ui| {
+            // Close button
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕ Close").clicked() {
+                        state.show_version_dialog = false;
+                        state.selected_mod = None;
+                        state.mod_versions = None;
+                    }
+                });
+            });
+            ui.separator();
+
+            // Target instance info
+            if let Some(ref instance) = state.target_instance {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Installing to: {} ({})",
+                        instance.info.name, instance.info.version
+                    ));
+                });
+                ui.separator();
+            } else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "⚠ No target instance selected. Please select an instance first.",
+                );
+                ui.separator();
+            }
+
+            // Loading indicator
+            if state.loading_versions {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading versions...");
+                });
+                return;
+            }
+
+            // Version list
+            if let Some(versions) = state.mod_versions.clone() {
+                if versions.is_empty() {
+                    ui.label("No compatible versions found for this game version and loader.");
+                } else {
+                    ui.label(format!("Found {} versions:", versions.len()));
+                    ui.add_space(4.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for version in &versions {
+                                render_version_row(ui, version, state);
+                            }
+                        });
+                }
+            } else {
+                ui.label("Loading versions...");
+            }
+        });
+}
+
+/// Render a single version row
+fn render_version_row(ui: &mut egui::Ui, version: &ModVersion, state: &mut ModBrowserState) {
+    egui::Frame::none()
+        .fill(ui.visuals().faint_bg_color)
+        .rounding(4.0)
+        .inner_margin(8.0)
+        .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    // Version name and number
+                    ui.horizontal(|ui| {
+                        ui.strong(&version.mod_name);
+                        ui.label(format!("({})", version.version_number));
+                    });
+
+                    // Game versions and loaders
+                    ui.horizontal(|ui| {
+                        ui.label(format!("MC: {}", version.game_versions.join(", ")));
+                        ui.label("•");
+                        ui.label(format!("Loaders: {}", version.loaders.join(", ")));
+                    });
+
+                    // File info
+                    ui.horizontal(|ui| {
+                        ui.label(&version.filename);
+                        ui.label(format!("({})", format_size(version.file_size)));
+                    });
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_download = state.target_instance.is_some();
+                    ui.add_enabled_ui(can_download, |ui| {
+                        if ui.button("⬇ Download").clicked() {
+                            state.selected_version = Some(version.clone());
+                            state.download_requested = true;
+                            state.show_version_dialog = false;
+                        }
+                    });
+                });
+            });
+        });
 }

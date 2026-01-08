@@ -15,6 +15,9 @@ pub struct Config {
 
     #[serde(default)]
     pub network: NetworkConfig,
+
+    #[serde(default)]
+    pub mods: ModsConfig,
 }
 
 impl Default for Config {
@@ -23,16 +26,32 @@ impl Default for Config {
             general: GeneralConfig::default(),
             java: JavaConfig::default(),
             network: NetworkConfig::default(),
+            mods: ModsConfig::default(),
         }
+    }
+}
+
+/// UI Theme
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Dark,
+    Light,
+    Magenta,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::Dark
     }
 }
 
 /// General launcher settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
-    /// UI theme (dark/light)
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    /// UI theme
+    #[serde(default)]
+    pub theme: Theme,
 
     /// UI language
     #[serde(default = "default_language")]
@@ -50,7 +69,7 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            theme: default_theme(),
+            theme: Theme::default(),
             language: default_language(),
             check_updates: true,
             close_on_launch: false,
@@ -115,10 +134,24 @@ impl Default for NetworkConfig {
     }
 }
 
-// Default value functions for serde
-fn default_theme() -> String {
-    "dark".to_string()
+/// Mod platform settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModsConfig {
+    /// CurseForge API key (user must obtain from console.curseforge.com)
+    #[serde(default)]
+    pub curseforge_api_key: String,
 }
+
+impl Default for ModsConfig {
+    fn default() -> Self {
+        Self {
+            curseforge_api_key: String::new(),
+        }
+    }
+}
+
+// Default value functions for serde
+
 fn default_language() -> String {
     "ja".to_string()
 }

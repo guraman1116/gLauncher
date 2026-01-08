@@ -17,6 +17,11 @@ use std::sync::mpsc;
 use super::actions::launch::launch_instance;
 use super::dialogs::log_viewer::cleanup_old_logs;
 use super::types::{AsyncResult, DeviceCodeData, LoginState, NewInstanceForm, View};
+use super::views::mod_browser::{ModBrowserState, ModSourceFilter, render_mod_browser};
+use crate::config::{self, Config, Theme};
+use crate::core::mods::curseforge::CurseForgeClient;
+use crate::core::mods::modrinth::ModrinthClient;
+use crate::core::mods::search::SearchFilter;
 
 /// Main launcher application state
 pub struct LauncherApp {
@@ -71,6 +76,10 @@ pub struct LauncherApp {
     log_window_instance: Option<String>,
     /// Auto-scroll logs
     log_auto_scroll: bool,
+    /// App configuration
+    config: Config,
+    /// Mod browser state
+    mod_browser_state: ModBrowserState,
 }
 
 use crate::core::update::UpdateStatus;
@@ -107,7 +116,19 @@ impl LauncherApp {
             show_log_window: false,
             log_window_instance: None,
             log_auto_scroll: true,
+            config: Config::default(),
+            mod_browser_state: ModBrowserState::new(),
         };
+
+        // Load configuration
+        if let Ok(config) = config::load() {
+            app.config = config;
+        } else {
+            tracing::warn!("Failed to load configuration, using defaults");
+        }
+
+        // Always apply theme
+        app.apply_theme(_cc.egui_ctx.clone());
 
         // Start update check
         let tx_clone = tx.clone();
@@ -360,6 +381,48 @@ impl LauncherApp {
         });
     }
 
+    fn start_mod_search(&mut self, ctx: &egui::Context) {
+        let query = self.mod_browser_state.query.clone();
+        let game_version = self.mod_browser_state.game_version.clone();
+        let loader = self.mod_browser_state.loader.clone();
+        let source = self.mod_browser_state.source.clone();
+        let api_key = self.config.mods.curseforge_api_key.clone();
+
+        self.mod_browser_state.loading = true;
+        self.mod_browser_state.error = None;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+
+        tokio::spawn(async move {
+            let filter = SearchFilter::new(&query)
+                .with_game_version(&game_version)
+                .with_loader(&loader);
+
+            let result = match source {
+                ModSourceFilter::Modrinth | ModSourceFilter::Both => {
+                    ModrinthClient::new().search(&filter).await
+                }
+                ModSourceFilter::CurseForge => {
+                    if api_key.is_empty() {
+                        Err(anyhow::anyhow!("CurseForge API key not configured"))
+                    } else {
+                        CurseForgeClient::new(api_key).search(&filter).await
+                    }
+                }
+            };
+
+            match result {
+                Ok(results) => {
+                    let _ = tx.send(AsyncResult::ModSearchResults(results));
+                }
+                Err(e) => {
+                    let _ = tx.send(AsyncResult::ModError(e.to_string()));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     fn check_async_results(&mut self) {
         if let Some(rx) = &self.async_receiver {
             if let Ok(result) = rx.try_recv() {
@@ -469,9 +532,96 @@ impl LauncherApp {
                         }
                         self.new_instance.loading_loader_versions = false;
                     }
+                    AsyncResult::ModSearchResults(results) => {
+                        self.mod_browser_state.results = Some(results);
+                        self.mod_browser_state.loading = false;
+                    }
+                    AsyncResult::ModVersions(versions) => {
+                        self.mod_browser_state.mod_versions = Some(versions);
+                    }
+                    AsyncResult::ModDownloaded(filename) => {
+                        self.mod_browser_state.download_progress = None;
+                        self.mod_browser_state.success_message =
+                            Some(format!("Downloaded: {}", filename));
+                    }
+                    AsyncResult::ModError(e) => {
+                        self.mod_browser_state.loading = false;
+                        self.mod_browser_state.download_progress = None;
+                        self.mod_browser_state.error = Some(e);
+                    }
                 }
             }
         }
+    }
+
+    /// Apply the selected theme to the context
+    fn apply_theme(&self, ctx: egui::Context) {
+        match self.config.general.theme {
+            Theme::Dark => {
+                let mut visuals = egui::Visuals::dark();
+                visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+                visuals.window_rounding = egui::Rounding::same(8.0);
+                ctx.set_visuals(visuals);
+            }
+            Theme::Light => {
+                let mut visuals = egui::Visuals::light();
+                visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+                visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+                visuals.window_rounding = egui::Rounding::same(8.0);
+                ctx.set_visuals(visuals);
+            }
+            Theme::Magenta => {
+                let mut visuals = egui::Visuals::light();
+
+                // Background - Light Pink
+                visuals.panel_fill = egui::Color32::from_rgb(255, 240, 245);
+                visuals.faint_bg_color = egui::Color32::from_rgb(255, 240, 245);
+
+                // Selection - Dark Pink (Deep Magenta)
+                visuals.selection.bg_fill = egui::Color32::from_rgb(220, 20, 100);
+                visuals.selection.stroke.color = egui::Color32::WHITE;
+
+                // Links
+                visuals.hyperlink_color = egui::Color32::from_rgb(200, 0, 150);
+
+                // Widgets (Buttons, Inputs, etc.)
+                // Inactive (Normal button state) - Light Blue/Cyan ("Light water color")
+                visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(200, 240, 255);
+                visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(200, 240, 255);
+
+                // Hovered
+                visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(180, 230, 255);
+                visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(100, 0, 100);
+
+                // Active (Clicked)
+                visuals.widgets.active.bg_fill = egui::Color32::from_rgb(220, 20, 100);
+                visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+
+                // Text input background
+                visuals.extreme_bg_color = egui::Color32::WHITE;
+
+                // Rounding
+                visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+                visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+                visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+                visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+                visuals.window_rounding = egui::Rounding::same(12.0);
+
+                ctx.set_visuals(visuals);
+            }
+        }
+
+        // Global styling (spacing)
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.spacing.window_margin = egui::Margin::same(12.0);
+        ctx.set_style(style);
     }
 }
 
@@ -485,38 +635,45 @@ impl eframe::App for LauncherApp {
             // Auto-clear after some time (simplified: just clear on next frame)
         }
 
-        // Top panel - Header
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("🎮 gLauncher");
-                ui.separator();
+        // Side panel - Navigation
+        egui::SidePanel::left("sidebar")
+            .resizable(false)
+            .default_width(180.0)
+            .show(ctx, |ui| {
+                ui.add_space(10.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading("🎮 gLauncher");
+                });
+                ui.add_space(20.0);
 
-                if ui
-                    .selectable_label(self.current_view == View::Instances, "📦 Instances")
-                    .clicked()
-                {
-                    self.current_view = View::Instances;
-                }
-                if ui
-                    .selectable_label(self.current_view == View::Accounts, "👤 Accounts")
-                    .clicked()
-                {
-                    self.current_view = View::Accounts;
-                }
-                if ui
-                    .selectable_label(self.current_view == View::Settings, "⚙️ Settings")
-                    .clicked()
-                {
-                    self.current_view = View::Settings;
+                // Highlight selected view
+                let buttons = [
+                    (View::Instances, "📦 Instances"),
+                    (View::Mods, "🔧 Mods"),
+                    (View::Accounts, "👤 Accounts"),
+                    (View::Settings, "⚙️ Settings"),
+                ];
+
+                for (view, label) in buttons {
+                    let is_selected = self.current_view == view;
+                    let button = egui::Button::new(label)
+                        .min_size(egui::vec2(ui.available_width(), 40.0))
+                        .selected(is_selected);
+
+                    if ui.add(button).clicked() {
+                        self.current_view = view;
+                    }
+                    ui.add_space(5.0);
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.add_space(20.0);
                     if let Some(account) = self.account_manager.active_account() {
                         ui.label(format!("👤 {}", account.profile.name));
+                        ui.separator();
                     }
                 });
             });
-        });
 
         // Bottom panel - Status bar
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -573,6 +730,7 @@ impl eframe::App for LauncherApp {
         // Central panel - Main content
         egui::CentralPanel::default().show(ctx, |ui| match self.current_view {
             View::Instances => self.show_instances(ui, ctx),
+            View::Mods => self.show_mods(ui, ctx),
             View::Accounts => self.show_accounts(ui, ctx),
             View::Settings => self.show_settings(ui),
         });
@@ -666,41 +824,25 @@ impl LauncherApp {
 
         // Bottom actions
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.add_space(20.0);
+
+            // Primary Action: Launch
+            let can_launch = self.selected_instance.is_some() && !self.is_loading;
+            let launch_btn =
+                egui::Button::new(egui::RichText::new("▶ Launch Game").size(16.0).strong())
+                    .min_size(egui::vec2(200.0, 40.0));
+
+            if ui.add_enabled(can_launch, launch_btn).clicked() {
+                if let Some(i) = self.selected_instance {
+                    let instance = self.instances[i].clone();
+                    self.start_launch(instance, ctx);
+                }
+            }
+
             ui.add_space(10.0);
+
+            // Secondary Actions
             ui.horizontal(|ui| {
-                let can_launch = self.selected_instance.is_some() && !self.is_loading;
-
-                if ui
-                    .add_enabled(
-                        can_launch,
-                        egui::Button::new("▶ Launch").min_size(egui::vec2(100.0, 30.0)),
-                    )
-                    .clicked()
-                {
-                    if let Some(i) = self.selected_instance {
-                        let instance = self.instances[i].clone();
-                        self.start_launch(instance, ctx);
-                    }
-                }
-
-                if ui
-                    .add_enabled(
-                        self.selected_instance.is_some(),
-                        egui::Button::new("🗑 Delete"),
-                    )
-                    .clicked()
-                {
-                    if let Some(i) = self.selected_instance {
-                        let name = self.instances[i].info.name.clone();
-                        if let Err(e) = self.instance_manager.delete(&name) {
-                            self.error_message = Some(e.to_string());
-                        } else {
-                            self.success_message = Some(format!("Deleted: {}", name));
-                            self.refresh_instances();
-                        }
-                    }
-                }
-
                 if ui
                     .add_enabled(
                         self.selected_instance.is_some(),
@@ -714,7 +856,6 @@ impl LauncherApp {
                     }
                 }
 
-                // View Logs button
                 if ui
                     .add_enabled(
                         self.selected_instance.is_some(),
@@ -726,6 +867,24 @@ impl LauncherApp {
                         let name = self.instances[i].info.name.clone();
                         self.log_window_instance = Some(name);
                         self.show_log_window = true;
+                    }
+                }
+
+                if ui
+                    .add_enabled(
+                        self.selected_instance.is_some(),
+                        egui::Button::new("� Delete"),
+                    )
+                    .clicked()
+                {
+                    if let Some(i) = self.selected_instance {
+                        let name = self.instances[i].info.name.clone();
+                        if let Err(e) = self.instance_manager.delete(&name) {
+                            self.error_message = Some(e.to_string());
+                        } else {
+                            self.success_message = Some(format!("Deleted: {}", name));
+                            self.refresh_instances();
+                        }
                     }
                 }
             });
@@ -1268,9 +1427,111 @@ impl LauncherApp {
         });
 
         ui.collapsing("Launcher Settings", |ui| {
-            ui.label("Theme: Dark");
+            ui.horizontal(|ui| {
+                ui.label("Theme:");
+                let old_theme = self.config.general.theme.clone();
+
+                egui::ComboBox::from_id_salt("theme_selector")
+                    .selected_text(format!("{:?}", self.config.general.theme))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.config.general.theme, Theme::Dark, "Dark");
+                        ui.selectable_value(&mut self.config.general.theme, Theme::Light, "Light");
+                        ui.selectable_value(
+                            &mut self.config.general.theme,
+                            Theme::Magenta,
+                            "Magenta",
+                        );
+                    });
+
+                if old_theme != self.config.general.theme {
+                    self.apply_theme(ui.ctx().clone());
+                    if let Err(e) = config::save(&self.config) {
+                        self.error_message = Some(format!("Failed to save config: {}", e));
+                    }
+                }
+            });
+
             ui.label("Language: Japanese");
         });
+
+        ui.collapsing("Mod Platform Settings", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("CurseForge API Key:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.config.mods.curseforge_api_key)
+                        .password(true)
+                        .hint_text("Enter API key...")
+                        .desired_width(300.0),
+                );
+                if response.lost_focus() {
+                    if let Err(e) = config::save(&self.config) {
+                        self.error_message = Some(format!("Failed to save config: {}", e));
+                    } else {
+                        self.success_message = Some("API key saved".to_string());
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Get your free API key at:");
+                ui.hyperlink("https://console.curseforge.com");
+            });
+        });
+    }
+
+    fn show_mods(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            ui.heading("Mod Browser");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Instance selector for mod installation target
+                if !self.instances.is_empty() {
+                    ui.label("Install to:");
+                    let current_name = self
+                        .mod_browser_state
+                        .target_instance
+                        .as_ref()
+                        .map(|i| i.info.name.clone())
+                        .unwrap_or_else(|| "Select instance...".to_string());
+
+                    egui::ComboBox::from_id_salt("mod_target_instance")
+                        .selected_text(&current_name)
+                        .show_ui(ui, |ui| {
+                            for instance in &self.instances {
+                                if ui
+                                    .selectable_label(
+                                        self.mod_browser_state
+                                            .target_instance
+                                            .as_ref()
+                                            .map(|i| i.info.name == instance.info.name)
+                                            .unwrap_or(false),
+                                        format!(
+                                            "{} ({})",
+                                            instance.info.name, instance.info.loader
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.mod_browser_state.set_target_instance(instance.clone());
+                                }
+                            }
+                        });
+                }
+            });
+        });
+        ui.separator();
+
+        // Check if search was requested from the UI
+        if self.mod_browser_state.search_requested {
+            self.mod_browser_state.search_requested = false;
+            self.start_mod_search(_ctx);
+        }
+
+        // Render the mod browser UI
+        render_mod_browser(
+            ui,
+            &mut self.mod_browser_state,
+            &self.config.mods.curseforge_api_key,
+            _ctx,
+        );
     }
 }
 

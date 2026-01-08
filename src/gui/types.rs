@@ -4,6 +4,7 @@
 
 use crate::core::auth::DeviceCodeResponse;
 use crate::core::instance::ModLoader;
+use crate::core::mods::search::{ModVersion, SearchResults};
 use crate::core::update::UpdateStatus;
 use crate::core::version::VersionManifest;
 
@@ -12,6 +13,7 @@ use crate::core::version::VersionManifest;
 pub enum View {
     #[default]
     Instances,
+    Mods,
     Settings,
     Accounts,
 }
@@ -67,4 +69,12 @@ pub enum AsyncResult {
     UpdateSuccess(String),
     UpdateError(String),
     Error(String),
+    /// Mod search results from Modrinth/CurseForge
+    ModSearchResults(SearchResults),
+    /// Mod versions for a selected mod
+    ModVersions(Vec<ModVersion>),
+    /// Mod download completed successfully
+    ModDownloaded(String),
+    /// Mod search/download error
+    ModError(String),
 }

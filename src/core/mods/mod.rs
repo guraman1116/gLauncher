@@ -1,6 +1,12 @@
 //! Mod management module
 //!
 //! Scans and manages mods in the instance mods folder.
+//! Also provides API clients for downloading mods from Modrinth and CurseForge.
+
+pub mod curseforge;
+pub mod download;
+pub mod modrinth;
+pub mod search;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

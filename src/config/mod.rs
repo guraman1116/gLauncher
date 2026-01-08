@@ -4,7 +4,7 @@
 
 mod schema;
 
-pub use schema::{Config, GeneralConfig, JavaConfig, NetworkConfig};
+pub use schema::{Config, GeneralConfig, JavaConfig, NetworkConfig, Theme};
 
 use anyhow::Result;
 use std::path::PathBuf;
